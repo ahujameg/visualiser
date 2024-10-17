@@ -1,0 +1,14 @@
+.. _app_usage:
+
+======================
+Application Usage
+======================
+
+Send data through Visualiser
+=======================================
+
+Follow these steps to send a data image to visualiser:
+
+    * Launch the Visualiser server in a browser at http://127.0.0.1:7000
+    * <Add more steps and figure here>
+

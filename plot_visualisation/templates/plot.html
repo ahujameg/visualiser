@@ -1,0 +1,36 @@
+<!-- plot.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Plotly Graph</title>
+    <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    <style>
+        /* Centering the container both horizontally and vertically using Flexbox */
+        body {
+            display: flex;
+            justify-content: center;  /* Horizontal centering */
+            align-items: center;      /* Vertical centering */
+            height: 100vh;            /* Full viewport height */
+            margin: 0;                /* Remove default body margin */
+        }
+
+        #plotly-div {
+            width: 800px;  /* You can adjust the width */
+            height: 600px; /* You can adjust the height */
+        }
+    </style>
+</head>
+<body>
+    <h1>Solved Proportions by Disease Category</h1>
+    <div id="plotly-div"></div>
+    <script type="text/javascript">
+        // Get the plotly JSON data passed from the Django view
+        var plotData = {{ plot|safe }};
+
+        // Render the Plotly graph
+        Plotly.newPlot('plotly-div', plotData.data, plotData.layout);
+    </script>
+</body>
+</html>

@@ -1,0 +1,33 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+certifi = "==2023.7.22"
+distlib = "==0.3.7"
+django = "==4.2.7"
+django-cookies-samesite = "==0.9.0"
+django-cors-headers = "*"
+djangorestframework = "==3.14.0"
+filelock = "==3.13.1"
+pipenv = "==2023.10.24"
+platformdirs = "==3.11.0"
+ua-parser = "==0.10.0"
+virtualenv = "==20.24.6"
+window = "==0.0.3"
+requests = "==2.31.0"
+openpyxl = "*"
+pandas = "*"
+matplotlib = "*"
+gunicorn = "*"
+django-environ = "*"
+sphinx-jsonschema = "*"
+sphinx = "*"
+sphinx-rtd-theme = "*"
+plotly = "*"
+
+[dev-packages]
+
+[requires]
+python_version = "3.10"
