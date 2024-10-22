@@ -66,7 +66,7 @@ Make sure Docker is installed, you can use the steps mentioned here to install D
 ### Starting other services with Docker compose
 
 #### HGQN service
- <Add description here>
+ Add description here
 
 ### Send data through Visualiser
 1. Launch the Visualiser server in a browser at http://127.0.0.1:7000
