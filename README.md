@@ -70,6 +70,6 @@ Make sure Docker is installed, you can use the steps mentioned here to install D
 
 ### Send data through Visualiser
 1. Launch the Visualiser server in a browser at http://127.0.0.1:7000
-2. Click on 'Choose File' button and select the image to send.
-3. <Add more steps here>
+2. Click on 'Choose Data' button and send it to the HGQN application.
+3. ...Add more steps here..
 
