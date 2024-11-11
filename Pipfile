@@ -28,6 +28,7 @@ sphinx-rtd-theme = "*"
 plotly = "*"
 
 [dev-packages]
+pipdeptree = "*"
 
 [requires]
 python_version = "3.10"

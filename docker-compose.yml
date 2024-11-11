@@ -1,67 +1,9 @@
-version: '3.4'
-
-x-cadd-rest-api-celeryd-worker: &cadd-rest-api-celeryd-worker
-  image: bihealth/cadd-rest-api:0.3.4-0
-  env_file: /media/meghna/TOSHIBA EXT/CADD/cadd-rest-api.env
-  command:
-    - celeryd
-  networks:
-    - varfish
-  restart: unless-stopped
-  volumes:
-    - "/nvme/IGSB/CADD/data/annotations:/opt/miniconda3/share/cadd-scripts-1.6-0/data/annotations:ro"
-    - "/nvme/IGSB/CADD/data/prescored:/opt/miniconda3/share/cadd-scripts-1.6-0/data/prescored:ro"
-    - "/nvme/IGSB/CADD/db:/data/db:rw"
-
+version: '3.8'
 
 services:
-  # We need both # the server and the CADD-based worker.
-  #
-  # You will need "cadd-rest-api-server" and "cadd-rest-api-celeryd-worker-*".
-  cadd-rest-api-server:
-    image: bihealth/cadd-rest-api:0.3.4-0
-    env_file: /media/meghna/TOSHIBA EXT/CADD/cadd-rest-api.env
+  app:
+    image: visualiser-app:latest  # Replace with the local image name and tag
+    container_name: my-app-container
     ports:
-      - "8080:8080"
-    command:
-      - wsgi
-    networks:
-      - varfish
-    restart: unless-stopped
-    volumes:
-      - type: bind
-        source: /nvme/IGSB/CADD/db/
-        target: /data/db
-        read_only: false
-
-  # You have to provide multiple cadd-rest-api-celeryd-worker container if
-  # you want to handle more than one query at a time.
-  cadd-rest-api-celeryd-worker-1:
-    <<: *cadd-rest-api-celeryd-worker
-  cadd-rest-api-celeryd-worker-2:
-    <<: *cadd-rest-api-celeryd-worker
-  cadd-rest-api-celeryd-worker-3:
-    <<: *cadd-rest-api-celeryd-worker
-  cadd-rest-api-celeryd-worker-4:
-    <<: *cadd-rest-api-celeryd-worker
-
-  redis:
-    image: redis:6
-    restart: unless-stopped
-    volumes:
-      - "/nvme/IGSB/redis/data:/data:rw"
-    networks:
-      - varfish
-
-  visualiser-app:
-    image: visualiser-app:latest
-    hostname: visualiser-app
-    ports:
-      - '7000:7000'
-    expose:
-      - '7000'
-    networks:
-      - varfish
-
-networks:
-  varfish:
+      - "7000:7000"  # Map port 7000 on the host to port 7000 in the container
+    restart: always
