@@ -26,9 +26,12 @@ sphinx-jsonschema = "*"
 sphinx = "*"
 sphinx-rtd-theme = "*"
 plotly = "*"
+kaleido = "*"
+rpy2 = "*"
 
 [dev-packages]
 pipdeptree = "*"
+ipykernel = "*"
 
 [requires]
 python_version = "3.10"

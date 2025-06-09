@@ -2,12 +2,12 @@ from django.test import TestCase
 from django.urls import reverse
 from pprint import pprint
 import json
+import pandas as pd
 import csv
 
 # class PlotApiTestCase(TestCase):
 #     def setUp(self):
-#         self.url = reverse('plot_api')  # Replace 'plot_api' with the actual name of your URL pattern
-#
+#         self.url = reverse('plot_api')  
 #     def read_tsv_file(self, file_path):
 #         data = {
 #             "Disease Category": [],  # Updated field name
@@ -173,3 +173,124 @@ class PlotApiTestCase(TestCase):
         # Check that the response indicates an error
         self.assertEqual(response.status_code, 400)
         self.assertIn('error', response.json())
+
+class PlotAgeApiTestCase(TestCase):
+    def setUp(self):
+        self.url = reverse('plot_age_bar')  # Update with the actual URL name
+
+    def test_plot_api_with_real_data(self):
+        # Define the input JSON data
+        input_data = [
+            {
+                "id": 319,
+                "age_group": "child",
+                "gender": "female",
+                "hpo_terms": "HP:0000252; HP:0000286; HP:0000369; HP:0005709",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": None
+            },
+            {
+                "id": 321,
+                "age_group": "adult",
+                "gender": "male",
+                "hpo_terms": "HP:0004322; HP:0001263",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": 0.0
+            },
+            {
+                "id": 319,
+                "age_group": "child",
+                "gender": "female",
+                "hpo_terms": "HP:0000252; HP:0000286; HP:0000369; HP:0005709",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": None
+            },
+            {
+                "id": 321,
+                "age_group": "adult",
+                "gender": "male",
+                "hpo_terms": "HP:0004322; HP:0001263",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": 0.0
+            },
+            {
+                "id": 319,
+                "age_group": "child",
+                "gender": "female",
+                "hpo_terms": "HP:0000252; HP:0000286; HP:0000369; HP:0005709",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": None
+            },
+            {
+                "id": 321,
+                "age_group": "adult",
+                "gender": "male",
+                "hpo_terms": "HP:0004322; HP:0001263",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": 0.0
+            },
+            {
+                "id": 319,
+                "age_group": "adult",
+                "gender": "female",
+                "hpo_terms": "HP:0000252; HP:0000286; HP:0000369; HP:0005709",
+                "novel_gene":False,
+                "is_solved": "unclear",
+                "autozygosity": None
+            },
+            {
+                "id": 321,
+                "age_group": "adult",
+                "gender": "male",
+                "hpo_terms": "HP:0004322; HP:0001263",
+                "novel_gene": True,
+                "is_solved": "unclear",
+                "autozygosity": 0.0
+            },
+            {
+                "id": 319,
+                "age_group": "child",
+                "gender": "female",
+                "hpo_terms": "HP:0000252; HP:0000286; HP:0000369; HP:0005709",
+                "novel_gene": False,
+                "is_solved": "unclear",
+                "autozygosity": None
+            },
+            {
+                "id": 321,
+                "age_group": "adult",
+                "gender": "male",
+                "hpo_terms": "HP:0004322; HP:0001263",
+                "novel_gene": True,
+                "is_solved": "solved",
+                "autozygosity": 0.0
+            }
+        ]
+
+        # Load data
+        all_cases_file = "all_cases_wHighEvNovel.tsv"
+        all_cases = pd.read_csv(all_cases_file, delimiter='\t').drop_duplicates(subset='case_ID_paper')
+
+ #       input_data = all_cases.to_dict(orient="records")
+        # Send a POST request to the API with the JSON data
+        response = self.client.post(self.url, json.dumps(input_data), content_type='application/json')
+
+        # Check that the response is successful
+        self.assertEqual(response.status_code, 200)
+
+        # Check that the response contains the expected keys
+        response_data = response.json()
+
+        # Print the first 10 entries in response data for debugging
+        print("Response Data (First 10 Rows):")
+        pprint(response_data['data'][:10])
+
+        self.assertIn('data', response_data)
+        self.assertIn('layout', response_data)
+

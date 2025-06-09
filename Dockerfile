@@ -8,6 +8,8 @@ ENV DJANGO_SETTINGS_MODULE=visualiser.settings
 
 COPY requirements.txt .
 
+RUN apt-get update && apt-get install -y r-base
+
 RUN pip install -r requirements.txt
 
 COPY . /apps/

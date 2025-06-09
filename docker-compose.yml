@@ -1,9 +1,9 @@
 version: '3.8'
 
 services:
-  app:
-    image: visualiser-app:latest  # Replace with the local image name and tag
-    container_name: my-app-container
+  visualiser:
+    image: visualiser-app:latest  
+    container_name: visualiser-app-container
     ports:
       - "7000:7000"  # Map port 7000 on the host to port 7000 in the container
     restart: always
