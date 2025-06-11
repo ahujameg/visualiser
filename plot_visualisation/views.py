@@ -13,6 +13,14 @@ from django.conf import settings
 from django.contrib import messages
 from plot_visualisation.figure1_part2 import generate_umap
 
+# or for a class-based DRF view
+from rest_framework.authentication import SessionAuthentication
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view
+
+class CsrfExemptSessionAuth(SessionAuthentication):
+    def enforce_csrf(self, request):  # disable check
+        return
 
 def index(request):
     return render(request, 'index.html')
@@ -105,6 +113,8 @@ def validate_json_data(data):
 
     return errors
 
+@csrf_exempt
+@api_view(["POST"])
 def plot_api(request):
     
     if request.method == 'POST':
@@ -181,6 +191,8 @@ def plot_api(request):
 
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
+@csrf_exempt
+@api_view(["POST"])
 def plot_age_bar(request):
     #print(request.body)
 
@@ -248,6 +260,8 @@ def plot_age_bar(request):
 
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
+@csrf_exempt
+@api_view(["POST"])
 def plot_umap(request):
 
     if request.method == 'POST':
@@ -294,6 +308,8 @@ def plot_umap(request):
 
     return JsonResponse({'error': 'Invalid request method'}, status=405)
 
+@csrf_exempt
+@api_view(["POST"])
 def plot_view(request):
     all_cases_file = "all_cases_wHighEvNovel.tsv"
     all_cases = pd.read_csv(all_cases_file, delimiter='\t').drop_duplicates(subset='case_ID_paper')
@@ -326,6 +342,8 @@ def plot_view(request):
     # Pass the JSON object to the template
     #return render(request, 'plot.html', {'plot': graph_json})
 
+@csrf_exempt
+@api_view(["POST"])
 def plot_trend(request):
     if request.method == 'POST':
         try:
@@ -384,6 +402,8 @@ def plot_trend(request):
 
 
 class FaceSenderView(APIView):
+
+    authentication_classes = [CsrfExemptSessionAuth]
 
     def get(self, request, *args, **kwargs):
         return render(request, 'index.html')
