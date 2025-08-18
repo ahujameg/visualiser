@@ -58,6 +58,7 @@ MIDDLEWARE = [
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
 
+
 ROOT_URLCONF = "visualiser.urls"
 
 TEMPLATES = [
@@ -135,3 +136,30 @@ CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = 'None'
 SESSION_COOKIE_SAMESITE = 'None'
+
+# ─── CORS ─────────────────────────────────────────────────────────────
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# If you ever need to send cookies or auth-headers:
+CORS_ALLOW_CREDENTIALS = True
+
+# Optional: make sure the headers your frontend sends are accepted
+CORS_ALLOW_HEADERS = [
+    "content-type",
+    "authorization",
+    "x-requested-with",
+    "accept",
+]
+
+# ─── CSRF ────────────────────────────────────────────────────────────
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Only for local development: the cookie must travel over HTTP
+CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = False

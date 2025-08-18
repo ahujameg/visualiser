@@ -1,5 +1,3 @@
-import requests
-import base64
 import json
 import pandas as pd
 import plotly.express as px
@@ -17,6 +15,12 @@ from plot_visualisation.figure1_part2 import generate_umap
 from rest_framework.authentication import SessionAuthentication
 from django.views.decorators.csrf import csrf_exempt
 from rest_framework.decorators import api_view
+
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view
+import json
+import pandas as pd
+import numpy as np
 
 class CsrfExemptSessionAuth(SessionAuthentication):
     def enforce_csrf(self, request):  # disable check
@@ -345,60 +349,105 @@ def plot_view(request):
 @csrf_exempt
 @api_view(["POST"])
 def plot_trend(request):
-    if request.method == 'POST':
-        try:
-            # Load and validate JSON data
-            data = json.loads(request.body)
 
-            all_cases = pd.DataFrame(data)
-            
-            # Ensure required columns exist
-            if 'solved' not in all_cases or 'quarter' not in all_cases:
-                return JsonResponse({'error': 'Missing required fields in input data'}, status=400)
-            
-            # Filter out missing values
-            all_cases = all_cases[all_cases['solved'].notna() & all_cases['quarter'].notna()]
-            
-            # Calculate solved proportions by quarter
-            solved_proportions = (
-                all_cases.groupby(['quarter', 'solved'])
-                .size()
-                .unstack(fill_value=0)
-            )
-            
-            # Normalize to get proportions
-            solved_proportions = solved_proportions.div(solved_proportions.sum(axis=1), axis=0).reset_index()
-            
-            # Convert to long format for Plotly
-            solved_proportions = solved_proportions.melt(id_vars=['quarter'], 
-                                                          var_name='solved', 
-                                                          value_name='solved_proportion_v')
-            
-            # Ensure 'quarter' is a column in the dataframe
-            if 'quarter' not in solved_proportions.columns:
-                return JsonResponse({'error': "Column 'quarter' not found in processed data"}, status=400)
-            
-            # Create a Plotly line chart to show trend over quarters
-            fig = px.line(
-                solved_proportions,
-                x='quarter',
-                y='solved_proportion_v',
-                color='solved',
-                markers=True,
-                title="Diagnostic Yield Trend Over Quarters",
-                labels={'solved_proportion_v': 'Diagnostic Yield', 'quarter': 'Quarter'},
-            )
-            
-            fig.update_layout(xaxis_type='category', height=600, width=800)
-            
-            graph_json = pio.to_json(fig)  # Convert the figure to JSON
-            return JsonResponse(graph_json, safe=False)
-        
-        except json.JSONDecodeError:
-            return JsonResponse({'error': 'Invalid JSON data'}, status=400)
-    
-    return JsonResponse({'error': 'Invalid request method'}, status=405)
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Invalid request method'}, status=405)
 
+    # ---------- Parse body ----------
+    try:
+        payload = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON data'}, status=400)
+
+    rows = payload.get('cases', [])
+    resolution = payload.get('resolution', 'quarter')  # 'quarter' | 'month'
+
+    if not rows:
+        fig = px.line(title="Diagnostic Yield Trend (no data)")
+        return JsonResponse(json.loads(pio.to_json(fig)), safe=False)
+
+    # ---------- DataFrame & validation ----------
+    df = pd.DataFrame(rows)
+    required = {'solved', 'year'} | ({'quarter'} if resolution == 'quarter' else {'month'})
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        return JsonResponse({'error': f"Missing required fields: {', '.join(missing)}"}, status=400)
+
+    df = df.dropna(subset=list(required)).copy()
+    if df.empty:
+        fig = px.line(title="Diagnostic Yield Trend (no rows after filtering)")
+        return JsonResponse(json.loads(pio.to_json(fig)), safe=False)
+
+    df['year'] = df['year'].astype(int)
+    df['solved'] = df['solved'].astype(str)
+
+    if resolution == 'quarter':
+        df['quarter'] = df['quarter'].astype(int)
+        df['period'] = pd.PeriodIndex.from_fields(year=df['year'], quarter=df['quarter'], freq='Q')
+    else:
+        df['month'] = df['month'].astype(int)
+        df['period'] = pd.PeriodIndex.from_fields(year=df['year'], month=df['month'], freq='M')
+
+    counts_wide = df.groupby(['period', 'solved']).size().unstack(fill_value=0)
+    if counts_wide.empty or (counts_wide.sum(axis=1) == 0).all():
+        fig = px.line(title="Diagnostic Yield Trend (no counts in groups)")
+        return JsonResponse(json.loads(pio.to_json(fig)), safe=False)
+
+    props_wide = counts_wide.div(counts_wide.sum(axis=1), axis=0)
+
+    counts = counts_wide.reset_index().melt(id_vars='period', var_name='solved', value_name='count')
+    props  = props_wide.reset_index().melt(id_vars='period', var_name='solved', value_name='proportion')
+    out    = counts.merge(props, on=['period', 'solved']).sort_values('period')
+
+    out['period_label'] = out['period'].astype(str)
+    category_order = list(out['period_label'].unique())
+
+    fig = px.line(
+        out,
+        x='period_label',
+        y='proportion',
+        color='solved',
+        markers=True,
+        custom_data=['count'],
+        title=f"Diagnostic Yield Trend ({'Quarterly' if resolution=='quarter' else 'Monthly'})",
+        labels={'proportion': 'Diagnostic Yield', 'period_label': 'Period', 'solved': 'Case Status'},
+    )
+
+    fig.update_traces(
+        mode='lines+markers',
+        hovertemplate=(
+            "Period: %{x}<br>"
+            #"Solved: %{legendgroup}<br>"
+            "Yield: %{y:.1%}<br>"
+            "Count: %{customdata[0]}<extra></extra>"
+        )
+    )
+    fig.update_yaxes(tickformat='.0%')
+    fig.update_layout(
+        xaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': category_order},
+        height=600
+    )
+
+    # ---------- Ensure JSON-serializability ----------
+    for trace in fig.data:
+        if isinstance(trace.x, np.ndarray):
+            trace.x = trace.x.tolist()
+        if isinstance(trace.y, np.ndarray):
+            trace.y = trace.y.tolist()
+        if isinstance(trace.customdata, np.ndarray):
+            trace.customdata = trace.customdata.tolist()
+
+    if isinstance(fig.layout.xaxis.categoryarray, np.ndarray):
+        fig.layout.xaxis.categoryarray = fig.layout.xaxis.categoryarray.tolist()
+
+    # ---------- Convert to dict ----------
+    fig_json = pio.to_json(fig, pretty=False)
+    fig_obj = json.loads(fig_json)
+
+    print("Backend - Traces:", len(fig_obj["data"]))
+    print("Sample y:", fig_obj["data"][0]["y"] if fig_obj["data"] else "None")
+
+    return JsonResponse(fig_obj, safe=False)
 
 
 class FaceSenderView(APIView):

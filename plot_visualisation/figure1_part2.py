@@ -402,7 +402,8 @@ def generate_umap(tnamse_data, lab, redo):
     for category in categories:
         if category != 'HPO':  # Exclude HPO category
             subset = non_hpo_data[non_hpo_data['disease_category'] == category]
-            text = subset["case_ID_paper"].str.wrap(30).apply(lambda x: x.replace('\n', '<br>'))
+            hpos = non_hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
+            text = 'Case ID: ' + subset["case_ID_paper"] + '<br>HPO Terms: ' + hpos
             #.append(subset["HPO_Names"].str.wrap(30).apply(lambda x: x.replace('\n', '<br>')))
             fig.add_trace(go.Scatter(
                 x=subset['dim1'],
