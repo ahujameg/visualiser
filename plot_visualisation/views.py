@@ -60,26 +60,6 @@ def generate_plotly_bar_chart(data):
     # Return the plot as a JSON object
     return fig.to_dict()
 
-# def plot_api(request):
-#     if request.method == 'POST':
-#         # Get the dynamic data from the request (JSON format)
-#         try:
-#             request_data = json.loads(request.body)
-#         except json.JSONDecodeError:
-#             return JsonResponse({'error': 'Invalid JSON format'}, status=400)
-#
-#         # Ensure the necessary fields are present
-#         if not all(key in request_data for key in ['Disease Category', 'Case Count', 'Diagnosed Cases']):
-#             return JsonResponse({'error': 'Missing required data fields'}, status=400)
-#
-#         # Generate the Plotly chart JSON
-#         plotly_chart = generate_plotly_bar_chart(request_data)
-#
-#         # Return the chart data as JSON
-#         return JsonResponse(plotly_chart)
-#
-#     return JsonResponse({'error': 'Invalid request method'}, status=405)
-
 # Validation function to check required fields
 def validate_json_data(data):
 #    required_fields = ['id', 'age_group', 'gender', 'hpo_terms', 'novel_gene', 'is_solved', 'autozygosity']
@@ -120,143 +100,164 @@ def validate_json_data(data):
 @csrf_exempt
 @api_view(["POST"])
 def plot_api(request):
-    
-    if request.method == 'POST':
-        try:
-            # Load the JSON data from the request
-            data = json.loads(request.body)
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Invalid request method'}, status=405)
 
-            # Validate the incoming data
-            validation_errors = validate_json_data(data)
-            if validation_errors:
-                return JsonResponse({'error': 'Validation Error', 'details': validation_errors}, status=400)
+    try:
+        # Load the JSON data from the request
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON data'}, status=400)
 
-            # Parse JSON data from request body
-            data = json.loads(request.body)
-            all_cases = pd.DataFrame(data)
+    # Convert API data to DataFrame (accept either list or {"data": [...]})
+    if isinstance(data, dict) and isinstance(data.get("data"), list):
+        all_cases = pd.DataFrame(data["data"])
+    else:
+        all_cases = pd.DataFrame(data)
 
-            # Ensure required columns exist
-            # if 'solved' not in all_cases or 'disease_category' not in all_cases:
-            #     return JsonResponse({'error': 'Missing required fields in input data'}, status=400)
+    # Basic validation
+    required_cols = {"disease_category", "solved"}
+    missing = [c for c in required_cols if c not in all_cases.columns]
+    if missing:
+        return JsonResponse({'error': 'Missing required fields', 'details': missing}, status=400)
 
-            # Calculate solved proportions
-            #if all_cases['solved'].isin('solved'):
-            # ss = (
-            #     all_cases[all_cases['solved'].notna()]
-            #         .groupby(['disease_category'])
-            #         .apply(lambda x: x.groupby('solved').size() / x.shape[0])
-            #         )
-            # print(ss)
-            solved_proportions = (
-                all_cases[all_cases['solved'].notna()]
-                .groupby(['disease_category', 'solved'])
-                .size()
-                .unstack(fill_value=0)  # Ensure we get a DataFrame even if all cases are solved
-            )
+    # Fill missing values in plotting columns
+    all_cases['solved'] = all_cases['solved'].fillna('unsolved')
+    all_cases['disease_category'] = all_cases['disease_category'].fillna('unknown')
 
-            # Normalize to get proportions
-            solved_proportions = solved_proportions.div(solved_proportions.sum(axis=1), axis=0).reset_index()
+    # Optional rename for clarity (aligns with your example’s naming)
+    all_cases = all_cases.rename(columns={
+        'solved': 'solved_candidate'
+    })
 
-            # Convert to long format for Plotly
-            solved_proportions = solved_proportions.melt(id_vars=['disease_category'], 
-                                             var_name='solved', 
-                                             value_name='solved_proportion_v')
+    # Filter rows that still have valid values
+    filtered = all_cases[
+        all_cases['solved_candidate'].notna() & all_cases['disease_category'].notna()
+    ].copy()
 
-            # solved_proportions = (all_cases[all_cases['solved'].notna()]
-            #               .groupby(['disease_category'])
-            #               .apply(lambda x: x.groupby('solved').size() / x.shape[0])
-            #               .reset_index(name='solved_proportion_v')
-            #               )
+    if filtered.empty:
+        return JsonResponse({'error': 'No valid rows to plot'}, status=400)
 
-            # Rename the count column properly
-            #solved_proportions = solved_proportions.rename(columns={0: 'solved_proportion_v'})
-            print(solved_proportions)
-            # Create a Plotly bar chart
-            fig = px.bar(
-                solved_proportions,
-                x='disease_category',
-                y='solved_proportion_v',
-                color='solved',
-                pattern_shape='solved',
-                title="Diagnostic yield by Disease Category",
-                labels={'solved_proportion_v': 'Diagnostic Yield', 'disease_category': 'Disease Category'},
-                barmode='stack'
-            )
+    # Group by disease_category and solved_candidate: absolute counts
+    counts = (
+        filtered.groupby(['disease_category', 'solved_candidate'])
+        .size()
+        .reset_index(name='count')
+    )
 
-            fig.update_layout(xaxis={'categoryorder': 'total descending'}, height=600, width=800)
-            # Save figure
-            #fig.write_image("plot_diagnostic_yield_b.pdf")
+    # Total per disease_category (for percentages and ordering)
+    totals = (
+        filtered.groupby('disease_category')
+        .size()
+        .reset_index(name='total_count')
+    )
 
-            graph_json = pio.to_json(fig)  # Convert the figure to JSON
-            return JsonResponse(graph_json, safe=False)
+    # Merge totals, compute proportion
+    df = counts.merge(totals, on='disease_category', how='left')
+    df['solved_proportion_v'] = df['count'] / df['total_count'].where(df['total_count'] != 0, 1)
 
-        except json.JSONDecodeError:
-            return JsonResponse({'error': 'Invalid JSON data'}, status=400)
+    # Sort categories by total count desc for nicer x-axis order
+    ordered_cats = (
+        totals.sort_values('total_count', ascending=False)['disease_category'].tolist()
+    )
 
-    return JsonResponse({'error': 'Invalid request method'}, status=405)
+    # Build Plotly figure: show ABSOLUTE counts, include percentage in hover
+    fig = go.Figure()
+    for name, group_df in df.groupby("solved_candidate"):
+        # Preserve category order
+        group_df = group_df.set_index('disease_category').reindex(ordered_cats).reset_index()
+
+        fig.add_trace(go.Bar(
+            x=group_df["disease_category"],
+            y=group_df["count"].tolist(),                 # absolute count on y-axis
+            name=name,
+            customdata=group_df[["solved_proportion_v"]].values.tolist(),
+            hovertemplate="%{x}<br>%{y} cases<br>%{customdata[0]:.2%} yield<extra></extra>",
+        ))
+
+    fig.update_layout(
+        barmode="stack",
+        title="Diagnostic Yield by Disease Category",
+        xaxis_title="Disease Category",
+        yaxis_title="Number of Cases",
+        xaxis=dict(categoryorder="array", categoryarray=ordered_cats),
+        height=600,
+        width=900,
+    )
+
+    graph_json = pio.to_json(fig)
+    return JsonResponse(graph_json, safe=False)
 
 @csrf_exempt
 @api_view(["POST"])
 def plot_age_bar(request):
-    #print(request.body)
-
     if request.method == 'POST':
         try:
             # Load the JSON data from the request
             data = json.loads(request.body)
 
-            # Validate the incoming data
-            #validation_errors = validate_json_data(data)
-            #if validation_errors:
-            #    return JsonResponse({'error': 'Validation Error', 'details': validation_errors}, status=400)
-
             # Convert API data to DataFrame
             all_cases = pd.DataFrame(data)
 
-            # Ensure required columns exist and handle missing data
+            # Fill missing values
             all_cases['solved'] = all_cases['solved'].fillna('unsolved')
             all_cases['age_group'] = all_cases['age_group'].fillna('unknown')
 
             # Rename columns for clarity
-            all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})
+            all_cases = all_cases.rename(columns={
+                'age_group': 'adult_child',
+                'solved': 'solved_candidate'
+            })
 
             # Filter cases with 'solved_candidate' not null
             filtered_cases = all_cases[all_cases['solved_candidate'].notna()]
 
             # Group by 'adult_child' and 'solved_candidate' and count occurrences
-            solved_proportions_ac = filtered_cases.groupby(['adult_child', 'solved_candidate']).size().reset_index(
-                name='count')
-
-            # Calculate the total counts per 'adult_child'
-            total_counts_ac = filtered_cases.groupby('adult_child').size().reset_index(name='total_count')
-
-            # Merge the total counts back into the original DataFrame
-            solved_proportions_ac = pd.merge(solved_proportions_ac, total_counts_ac, on='adult_child')
-
-            # Calculate the solved proportion
-            solved_proportions_ac['solved_proportion_v'] = solved_proportions_ac['count'] / solved_proportions_ac[
-                'total_count']
-
-            # Create interactive bar plot for adult-child status
-            fig_ac = px.bar(
-                solved_proportions_ac,
-                x='adult_child',
-                y='solved_proportion_v',
-                color='solved_candidate',
-                title="Diagnostic Yield by Adult-Child Status",
-                labels={
-                    'solved_proportion_v': 'Diagnostic Yield',
-                    'adult_child': 'Adult-Child Status',
-                    'solved_candidate': 'Solved'
-                },
-                barmode='stack'
+            solved_proportions_ac = (
+                filtered_cases.groupby(['adult_child', 'solved_candidate'])
+                .size()
+                .reset_index(name='count')
             )
 
-            # Save figure
-            #fig_ac.write_image("plot_diagnostic_yield_all_info_adult_child.pdf")
+            # Calculate total counts per 'adult_child'
+            total_counts_ac = (
+                filtered_cases.groupby('adult_child')
+                .size()
+                .reset_index(name='total_count')
+            )
+
+            # Merge total counts back into grouped data
+            solved_proportions_ac = pd.merge(
+                solved_proportions_ac,
+                total_counts_ac,
+                on='adult_child'
+            )
+
+            # Calculate percentages
+            solved_proportions_ac['solved_proportion_v'] = (
+                solved_proportions_ac['count'] / solved_proportions_ac['total_count']
+            )
+
+            # Build plotly figure manually to embed both count and percentage
+            fig = go.Figure()
+            for name, group_df in solved_proportions_ac.groupby("solved_candidate"):
+                fig.add_trace(go.Bar(
+                    x=group_df["adult_child"],
+                    y=group_df["count"].tolist(),  # absolute count shown by default
+                    name=name,
+                    customdata=group_df[["solved_proportion_v"]].values.tolist(),
+                    hovertemplate="%{x}<br>%{y} cases<br>%{customdata[0]:.2%} yield<extra></extra>",
+                ))
+
+            fig.update_layout(
+                barmode="stack",
+                title="Diagnostic Yield by Adult-Child Status",
+                xaxis_title="Adult-Child Status",
+                yaxis_title="Number of Cases",
+            )
 
             # Convert the Plotly figure to JSON
-            graph_json = pio.to_json(fig_ac)  # Convert the figure to JSON
+            graph_json = pio.to_json(fig)
             return JsonResponse(graph_json, safe=False)
 
         except json.JSONDecodeError:
@@ -277,19 +278,11 @@ def plot_umap(request):
             #validation_errors = validate_json_data(data)
             #if validation_errors:
             #    return JsonResponse({'error': 'Validation Error', 'details': validation_errors}, status=400)
-        
-            # Convert API data to DataFrame
-            
-            #dataInput = pd.DataFrame(data)
-            #print(dataInput)
+  
             all_cases = pd.DataFrame(dataInput['cases'])
-            print(all_cases)
             lab = dataInput['lab']
-            print(lab)
             redo = dataInput['redo']
             print(redo)
-
-            #print(all_cases)
 
             # Ensure required columns exist and handle missing data
             # all_cases['mutation'] = all_cases['mutation'].fillna('unknown')
@@ -299,9 +292,6 @@ def plot_umap(request):
             #all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})
 
             fig = generate_umap(all_cases, lab, redo)
-
-            # Save figure
-            #fig.write_image("plot_umap.pdf")
 
             # Convert the Plotly figure to JSON
             graph_json = pio.to_json(fig)  # Convert the figure to JSON
@@ -393,7 +383,9 @@ def plot_trend(request):
         fig = px.line(title="Diagnostic Yield Trend (no counts in groups)")
         return JsonResponse(json.loads(pio.to_json(fig)), safe=False)
 
-    props_wide = counts_wide.div(counts_wide.sum(axis=1), axis=0)
+    # proportions per period (avoid div-by-zero)
+    denom = counts_wide.sum(axis=1).replace(0, 1)
+    props_wide = counts_wide.div(denom, axis=0)
 
     counts = counts_wide.reset_index().melt(id_vars='period', var_name='solved', value_name='count')
     props  = props_wide.reset_index().melt(id_vars='period', var_name='solved', value_name='proportion')
@@ -402,31 +394,37 @@ def plot_trend(request):
     out['period_label'] = out['period'].astype(str)
     category_order = list(out['period_label'].unique())
 
-    fig = px.line(
-        out,
-        x='period_label',
-        y='proportion',
-        color='solved',
-        markers=True,
-        custom_data=['count'],
-        title=f"Diagnostic Yield Trend ({'Quarterly' if resolution=='quarter' else 'Monthly'})",
-        labels={'proportion': 'Diagnostic Yield', 'period_label': 'Period', 'solved': 'Case Status'},
-    )
+    # ---------- Plot: ABSOLUTE counts on Y; also carry proportions for toggling ----------
+    fig = go.Figure()
+    for name, group_df in out.groupby("solved", sort=False):
+        # Preserve chronological order on x
+        gd = group_df.set_index('period_label').reindex(category_order).reset_index()
 
-    fig.update_traces(
-        mode='lines+markers',
-        hovertemplate=(
-            "Period: %{x}<br>"
-            #"Solved: %{legendgroup}<br>"
-            "Yield: %{y:.1%}<br>"
-            "Count: %{customdata[0]}<extra></extra>"
-        )
-    )
-    fig.update_yaxes(tickformat='.0%')
+        counts_list = gd["count"].astype(float).where(gd["count"].notna(), None).tolist()
+        props_list  = gd["proportion"].astype(float).where(gd["proportion"].notna(), None).tolist()
+
+        fig.add_trace(go.Scatter(
+            x=gd["period_label"],
+            y=counts_list,  # default: absolute counts on Y
+            name=name,
+            mode="lines+markers",
+            customdata=np.column_stack([props_list]).tolist(),  # [proportion]
+            hovertemplate=(
+                "Period: %{x}<br>"
+                "Count: %{y}<br>"
+                "Yield: %{customdata[1]:.2%}<extra></extra>"
+            ),
+            connectgaps=False,
+        ))
+
     fig.update_layout(
+        title=f"Diagnostic Yield Trend ({'Quarterly' if resolution=='quarter' else 'Monthly'})",
+        xaxis_title="Period",
+        yaxis_title="Number of Cases",
         xaxis={'type': 'category', 'categoryorder': 'array', 'categoryarray': category_order},
         height=600
     )
+
 
     # ---------- Ensure JSON-serializability ----------
     for trace in fig.data:
@@ -434,18 +432,14 @@ def plot_trend(request):
             trace.x = trace.x.tolist()
         if isinstance(trace.y, np.ndarray):
             trace.y = trace.y.tolist()
-        if isinstance(trace.customdata, np.ndarray):
+        if hasattr(trace, "customdata") and isinstance(trace.customdata, np.ndarray):
             trace.customdata = trace.customdata.tolist()
 
     if isinstance(fig.layout.xaxis.categoryarray, np.ndarray):
         fig.layout.xaxis.categoryarray = fig.layout.xaxis.categoryarray.tolist()
 
-    # ---------- Convert to dict ----------
     fig_json = pio.to_json(fig, pretty=False)
     fig_obj = json.loads(fig_json)
-
-    print("Backend - Traces:", len(fig_obj["data"]))
-    print("Sample y:", fig_obj["data"][0]["y"] if fig_obj["data"] else "None")
 
     return JsonResponse(fig_obj, safe=False)
 

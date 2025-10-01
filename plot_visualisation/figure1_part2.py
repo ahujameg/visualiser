@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import os
+import numpy as np 
 
 from rpy2.robjects import conversion, default_converter
 
@@ -358,7 +359,6 @@ def generate_umap(tnamse_data, lab, redo):
     hpo_data = TNAMSE_and_HPO[TNAMSE_and_HPO['disease_category'] == 'HPO']
     #novel_gene_data = TNAMSE_and_HPO[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene'])]
 
-
     # Assign unique colors to each disease category
     categories = TNAMSE_and_HPO['disease_category'].unique()
 
@@ -380,14 +380,12 @@ def generate_umap(tnamse_data, lab, redo):
 
     TNAMSE_and_HPO['color'] = TNAMSE_and_HPO['disease_category'].map(color_map)
 
-
-
     # Re-plot using the rotated dimensions
     fig = make_subplots()
 
     text = hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
     
-    # Add rotated HPO points
+    # Add HPO points
     fig.add_trace(go.Scatter(
         x=hpo_data['dim1'],
         y=hpo_data['dim2'],
@@ -398,31 +396,56 @@ def generate_umap(tnamse_data, lab, redo):
         hoverinfo="text"  # Ensure hover text is displayed
     ))
 
-    # Add scatter points for each non-HPO disease category
+    # Add scatter points for each non-HPO disease category  
     for category in categories:
-        if category != 'HPO':  # Exclude HPO category
-            subset = non_hpo_data[non_hpo_data['disease_category'] == category]
-            hpos = non_hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
-            text = 'Case ID: ' + subset["case_ID_paper"] + '<br>HPO Terms: ' + hpos
-            #.append(subset["HPO_Names"].str.wrap(30).apply(lambda x: x.replace('\n', '<br>')))
-            fig.add_trace(go.Scatter(
-                x=subset['dim1'],
-                y=subset['dim2'],
-                mode='markers',
-                marker=dict(size=10, color=color_map[category]),
-                name=category,  # Legend entry for the category
-                hovertext=text,  # Assign hover text
-                hoverinfo="text"  # Ensure hover text is displayed
-            ))
+        if category == 'HPO':
+            continue
+
+        subset = non_hpo_data[non_hpo_data['disease_category'] == category].copy()
+        if subset.empty:
+            continue
+
+        # Filter out non-finite coordinates so every remaining point can render & hover
+        finite = np.isfinite(subset['dim1'].to_numpy()) & np.isfinite(subset['dim2'].to_numpy())
+        if not finite.any():
+            continue
+        subset = subset.loc[finite]
+
+        # Build per-point hover text from THIS subset (indexes/lengths align)
+        hpos_subset = (
+            subset["HPO_Names"]
+            .fillna("")
+            .astype(str)
+            .str.wrap(60)
+            .str.replace("\n", "<br>")
+        )
+        # If a case has no HPO names, show a placeholder so hover isn’t empty
+        hpos_subset = hpos_subset.replace("", "–")
+
+        text = (
+            "Case ID: " + subset["case_ID_paper"].astype(str) +
+            "<br>HPO Terms: " + hpos_subset
+        )
+
+        fig.add_trace(go.Scatter(
+            x=subset['dim1'],
+            y=subset['dim2'],
+            mode='markers',
+            marker=dict(size=10, color=color_map.get(category, 'gray')),
+            name=category,
+            hovertext=text,       # aligned 1:1 with x/y
+            hoverinfo="text",     # show only the text we provided
+            hovertemplate="%{hovertext}<extra></extra>",  # cleaner hover box
+        ))
 
     # Add novel gene points
-    fig.add_trace(go.Scatter(
-        x=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim1'],
-        y=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim2'],
-        mode='markers',
-        marker=dict(color='rgba(255, 0, 0, 0.0)', symbol='triangle-up', line=dict(width=2, color='black'), size=12),
-        name='Novel Disease Gene'
-    ))
+    # fig.add_trace(go.Scatter(
+    #     x=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim1'],
+    #     y=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim2'],
+    #     mode='markers',
+    #     marker=dict(color='rgba(255, 0, 0, 0.0)', symbol='triangle-up', line=dict(width=2, color='black'), size=12),
+    #     name='Novel Disease Gene'
+    # ))
 
     fig.update_layout(title="UMAP Visualization", xaxis_title="dim1", yaxis_title="dim2", autosize=True, width=800, height=600)
 
