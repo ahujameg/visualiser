@@ -291,7 +291,7 @@ hpo_obo = f"{args[0]}"
 gene_to_pheno_path = f"{args[1]}"
 #redo = args[2]
 
-def generate_umap(tnamse_data, lab, redo):
+def generate_umap(tnamse_data, lab, selected_case_id, redo):
     
     # Read the genes_to_phenotype file and create a mapping dictionary
     gene_to_pheno = pd.read_csv("genes_to_phenotype.txt", sep="\t", dtype=str)
@@ -299,8 +299,8 @@ def generate_umap(tnamse_data, lab, redo):
     labFile = lab + ".csv"
 
     # Filter
-    tnamse_data = tnamse_data[(tnamse_data["disease_category"] != 'unspecified') & (tnamse_data["disease_category"] != 'other')]
-    
+    #tnamse_data = tnamse_data[(tnamse_data["disease_category"] != 'unspecified') & (tnamse_data["disease_category"] != 'other')]
+
     if redo == 'redo' or not os.path.isfile(labFile) : 
 
       # Activate automatic conversion
@@ -340,6 +340,7 @@ def generate_umap(tnamse_data, lab, redo):
     # Load the data
     TNAMSE_and_HPO = pd.read_csv(labFile)
     #cluster_descriptions = pd.read_csv("cluster_descriptions.csv")
+    print("Loaded TNAMSE_and_HPO:", TNAMSE_and_HPO)
 
     # Create a dictionary mapping HPO Term ID to HPO Term Name
     hpo_mapping = dict(zip(gene_to_pheno["HPO_Term_ID"], gene_to_pheno["HPO_Term_Name"]))
@@ -359,6 +360,7 @@ def generate_umap(tnamse_data, lab, redo):
     hpo_data = TNAMSE_and_HPO[TNAMSE_and_HPO['disease_category'] == 'HPO']
     #novel_gene_data = TNAMSE_and_HPO[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene'])]
 
+    print("non_hpo_data...", non_hpo_data)
     # Assign unique colors to each disease category
     categories = TNAMSE_and_HPO['disease_category'].unique()
 
@@ -438,6 +440,46 @@ def generate_umap(tnamse_data, lab, redo):
             hovertemplate="%{hovertext}<extra></extra>",  # cleaner hover box
         ))
 
+    # Add the selected case trace LAST to ensure it is on top
+    if selected_case_id:
+        selected = TNAMSE_and_HPO[TNAMSE_and_HPO['case_ID_paper'] == selected_case_id]
+        if not selected.empty:
+            selected_hpos = (
+                selected["HPO_Names"]
+                .fillna("")
+                .astype(str)
+                .str.wrap(60)
+                .str.replace("\n", "<br>")
+            )
+            text = (
+                "Case ID: " + selected["case_ID_paper"].astype(str) +
+                "<br>HPO Terms: " + selected_hpos
+            )
+            fig.add_trace(go.Scatter(
+                x=selected['dim1'],
+                y=selected['dim2'],
+                mode='markers',
+                marker=dict(
+                    color='red', 
+                    size=10,  # Larger size for visibility
+                    line=dict(color='black', width=3)  # Distinct border
+                ),
+                name='selected case',
+                hovertext=text,       # aligned 1:1 with x/y
+                hoverinfo="text",     # show only the text we provided
+                hovertemplate="%{hovertext}<extra></extra>",  # cleaner hover box
+                hoverlabel=dict(
+                    font=dict(color='black'),  # text color
+                    bgcolor='red',           # optional: background color for contrast
+                    bordercolor='black'        # optional: border
+                )
+            ))
+
+    # Turn off 'other' and 'unspecified' categories by default
+    for trace in fig.data:
+        if trace.name == 'other' or trace.name == 'unspecified':
+            trace.visible = 'legendonly'
+
     # Add novel gene points
     # fig.add_trace(go.Scatter(
     #     x=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim1'],
@@ -447,8 +489,17 @@ def generate_umap(tnamse_data, lab, redo):
     #     name='Novel Disease Gene'
     # ))
 
+    # Position the legend inside the plot (top right)
+    fig.update_layout(
+        legend=dict(
+            x=0.75,       # Horizontal position (0–1, left to right)
+            y=0.05,       # Vertical position (0–1, bottom to top)
+            bgcolor='rgba(255,255,255,0.5)',  # Optional: semi-transparent background
+            bordercolor='Grey',
+            borderwidth=1
+        ),
+        margin=dict(t=30, r=30, l=30, b=30)
+    )
+
     fig.update_layout(title="UMAP Visualization", xaxis_title="dim1", yaxis_title="dim2", autosize=True, width=800, height=600)
-
     return fig
-
-

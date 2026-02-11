@@ -14,4 +14,4 @@ RUN pip install -r requirements.txt
 
 COPY . /apps/
 
-CMD ["gunicorn", "--bind", ":7000", "--workers", "3", "--timeout", "36000", "--graceful-timeout", "36000", "config.wsgi:application"]
+CMD ["gunicorn", "--bind", ":7000", "--workers", "1", "--timeout", "36000", "--graceful-timeout", "36000", "config.wsgi:application"]

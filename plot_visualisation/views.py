@@ -282,6 +282,7 @@ def plot_umap(request):
             all_cases = pd.DataFrame(dataInput['cases'])
             lab = dataInput['lab']
             redo = dataInput['redo']
+            selected_case_id = dataInput['selected']
             print(redo)
 
             # Ensure required columns exist and handle missing data
@@ -291,7 +292,7 @@ def plot_umap(request):
             # Rename columns for clarity
             #all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})
 
-            fig = generate_umap(all_cases, lab, redo)
+            fig = generate_umap(all_cases, lab, selected_case_id, redo)
 
             # Convert the Plotly figure to JSON
             graph_json = pio.to_json(fig)  # Convert the figure to JSON

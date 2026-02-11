@@ -34,5 +34,5 @@ RUN sed -i "/SECRET_KEY/s/^SECRET_KEY.*\\$/SECRET_KEY = \"`python manage.py shel
 
 EXPOSE 7000
 
-CMD ["gunicorn", "--bind", "0.0.0.0:7000", "--workers", "6", "--timeout", "0", "--graceful-timeout", "0", "--max-requests", "500", "--max-requests-jitter", "100", "config.wsgi:application"]
+CMD ["gunicorn", "--bind", "0.0.0.0:7000", "--workers", "1", "--timeout", "0", "--graceful-timeout", "0", "--max-requests", "500", "--max-requests-jitter", "100", "config.wsgi:application"]
 
