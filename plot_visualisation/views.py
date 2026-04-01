@@ -273,6 +273,9 @@ def plot_umap(request):
         try:
             # Load the JSON data from the request
             dataInput = json.loads(request.body)
+            
+            if dataInput is None:
+                return JsonResponse({'error': 'No JSON input in the request body'}, status=400)
 
             # Validate the incoming data
             #validation_errors = validate_json_data(data)
@@ -282,7 +285,7 @@ def plot_umap(request):
             all_cases = pd.DataFrame(dataInput['cases'])
             lab = dataInput['lab']
             redo = dataInput['redo']
-            selected_case_id = dataInput['selected']
+            selected_case_id = dataInput.get('selected')
             print(redo)
 
             # Ensure required columns exist and handle missing data
@@ -291,6 +294,23 @@ def plot_umap(request):
 
             # Rename columns for clarity
             #all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})
+
+            # # --- ensure we have HPO_term_IDs ---
+            # if "HPO_term_IDs" not in all_cases.columns:
+            #     # common alternative field names (adjust to your actual payload)
+            #     for alt in ["hpoTerms", "HPO_terms", "hpo_term_IDs", "hpo_term_ids"]:
+            #         if alt in all_cases.columns:
+            #             all_cases = all_cases.rename(columns={alt: "HPO_term_IDs"})
+            #             break
+
+            # if "HPO_term_IDs" not in all_cases.columns:
+            #     return JsonResponse({
+            #         "error": "Missing required column 'HPO_term_IDs'",
+            #         "available_columns": list(all_cases.columns),
+            #     }, status=400)
+
+            # # IMPORTANT: keep missing as NA/NaN, NOT the string "unknown"
+            # all_cases["HPO_term_IDs"] = all_cases["HPO_term_IDs"].replace({"unknown": np.nan, "": np.nan})
 
             fig = generate_umap(all_cases, lab, selected_case_id, redo)
 

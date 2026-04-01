@@ -23,6 +23,10 @@ library(ggrepel)
 library(flexclust)
 library(proxy)
 library(Matrix)
+library(Matrix)
+library(irlba)
+library(RcppAnnoy)
+library(igraph)
 
 prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
 
@@ -50,13 +54,13 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
   TNAMSE_data <- TNAMSE_data[TNAMSE_data$HPO_Term_IDs %in% hpos_to_keep,]
 
   # Deduplicate and clean data
-  TNAMSE_data_red <- TNAMSE_data %>% 
-    distinct(case_ID_paper, .keep_all = TRUE) %>% 
-    select(-HPO_Term_IDs)
-
-  for (x in 1:nrow(TNAMSE_data_red)) {
-    TNAMSE_data_red$HPO_term_IDs[[x]] <- (TNAMSE_data[which(TNAMSE_data$case_ID_paper == TNAMSE_data_red[x,]$case_ID_paper), ]$HPO_Term_IDs)
-  }
+  TNAMSE_data_red <- TNAMSE_data %>%
+  group_by(case_ID_paper) %>%
+  summarise(
+    across(-HPO_Term_IDs, first),
+    HPO_term_IDs = list(unique(HPO_Term_IDs)),
+    .groups = "drop"
+  )
 
   # Process gene-to-phenotype data
   gene_to_pheno <- gene_to_pheno[gene_to_pheno$HPO_Term_ID %in% hpos_to_keep,]
@@ -79,46 +83,6 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
     )
   }
 
-  
-
-  # # Precompute unique HPO term sets
-  # unique_hpo_sets <- unique(TNAMSE_data_red$HPO_term_IDs)
-  # similarity_cache <- list()
-
-  # compute_similarity <- function(term_set) {
-  #   key <- paste(sort(term_set), collapse = "_")
-  #   if (!key %in% names(similarity_cache)) {
-  #     similarity_cache[[key]] <- get_sim_grid(ontology = hpo, 
-  #                                             information_content = descendants_IC(hpo),
-  #                                             term_sets = list(term_set),
-  #                                             term_sim_method = "resnik", 
-  #                                             combine = "average")
-  #   }
-  #   return(similarity_cache[[key]])
-  # }
-
-  # # Compute similarity matrix using cached values
-  # sim_results <- lapply(TNAMSE_data_red$HPO_term_IDs, compute_similarity)
-  # master_sim_mat <- do.call(rbind, sim_results)
-
-  # # Convert to sparse matrix for efficiency
-  # master_sim_mat <- Matrix(master_sim_mat, sparse = TRUE)
-
-  # # Optimize distance matrix computation
-  # set.seed(1)
-  # custom.settings <- umap.defaults
-  # custom.settings$input <- "dist"
-  # custom.settings$n_components <- 4
-  
-  # dist_matrix <- proxy::dist(as.matrix(max(master_sim_mat) - master_sim_mat) ** 2, method = "euclidean")
-  
-  # res_umap <- umap(as.matrix(dist_matrix), config = custom.settings)
-  # colnames(res_umap$layout) <- paste0("dim", 1:(custom.settings$n_components))
-  
-  # TNAMSE_data_red <- cbind(TNAMSE_data_red, res_umap$layout)
-
-
-
 
   library(plyr)
   TNAMSE_and_HPO <- rbind.fill(TNAMSE_data_red, list_of_phenotypes_HPO)
@@ -129,40 +93,471 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
   
   print("Checking redo")
   print(redo)
-  if (redo == "redo") {
-    print(redo)
-    # plan(multisession, workers = parallel::detectCores() - 1)
-    # master_sim_mat <- future_lapply(TNAMSE_and_HPO$HPO_term_IDs, function(x) {
-    #   get_sim_grid(ontology = hpo, information_content = information_content, term_sets = x, term_sim_method = "resnik", combine = "average")
-    # })
-    # plan(sequential)  # Reset plan
-    master_sim_mat <- get_sim_grid(ontology = hpo, information_content = information_content,
-                                   term_sets = TNAMSE_and_HPO$HPO_term_IDs, 
-                                   term_sim_method = "resnik", combine = "average")
-    write_rds(x = master_sim_mat, file = "master_sim_mat.RDS")
-  } else {
-    print("redo is off")
-    master_sim_mat <- readRDS(file = "master_sim_mat.RDS")
+if (redo == "redo") {
+
+  # ----------------------------
+  # A) Prepare case list (1 row per case) and term_sets list
+  # ----------------------------
+  TNAMSE_cases <- TNAMSE_and_HPO %>%
+    dplyr::distinct(case_ID_paper, .keep_all = TRUE)
+
+  case_ids <- TNAMSE_cases$case_ID_paper
+  term_sets <- TNAMSE_cases$HPO_term_IDs
+  
+  # Precompute exact-signature + ancestor-expanded term sets (avoid repeated get_ancestors)
+  sig <- vapply(term_sets, function(ts) paste(sort(unique(ts[!is.na(ts)])), collapse="|"), character(1))
+
+  anc_sets <- lapply(term_sets, function(ts) {
+  ts <- unique(ts[!is.na(ts)])
+  if (length(ts) == 0) return(character(0))
+  parents <- unique(unlist(hpo$parents[ts]))
+  out <- unique(c(ts, parents))
+  out[!is.na(out)]
+  })
+  names(term_sets) <- case_ids
+
+  n <- length(case_ids)
+  if (n < 3) stop("Too few cases for embedding: ", n)
+
+  # ----------------------------
+  # B) Build sparse case x HPO matrix for candidate neighbor search
+  # ----------------------------
+  case_terms <- TNAMSE_cases %>%
+    tidyr::unnest(HPO_term_IDs) %>%
+    dplyr::filter(!is.na(HPO_term_IDs)) %>%
+    dplyr::distinct(case_ID_paper, HPO_term_IDs)
+
+  # Ensure consistent ordering of rows = case_ids
+  case_terms$case_ID_paper <- factor(case_terms$case_ID_paper, levels = case_ids)
+
+  hpo_levels <- sort(unique(case_terms$HPO_term_IDs))
+  case_terms$HPO_term_IDs <- factor(case_terms$HPO_term_IDs, levels = hpo_levels)
+
+  X <- Matrix::sparseMatrix(
+    i = as.integer(case_terms$case_ID_paper),
+    j = as.integer(case_terms$HPO_term_IDs),
+    x = 1,
+    dims = c(length(case_ids), length(hpo_levels)),
+    dimnames = list(case_ids, hpo_levels)
+  )
+
+  # Optional but highly recommended: drop ultra-rare and ultra-common terms
+  df <- Matrix::colSums(X > 0)
+  keep_cols <- (df >= 2) & (df <= 0.5 * nrow(X))
+  X <- X[, keep_cols, drop = FALSE]
+  rm(df, keep_cols, case_terms); gc()
+
+  # ----------------------------
+  # C) TF-IDF + LSA embedding for fast kNN candidates
+  # ----------------------------
+  df2 <- Matrix::colSums(X > 0)
+  idf <- log1p(nrow(X) / pmax(df2, 1))
+  X_tfidf <- X %*% Diagonal(x = as.numeric(idf))
+
+  # L2 normalize rows (so Euclidean ~ cosine-ish in low-dim space)
+  rs <- sqrt(Matrix::rowSums(X_tfidf^2))
+  rs[rs == 0] <- 1
+  # Row-normalize without touching @x/@p directly (keeps matrix sparse)
+  X_tfidf <- Matrix::Diagonal(x = as.numeric(1 / rs)) %*% X_tfidf
+
+  cat("X_tfidf dims:", dim(X_tfidf), "\n"); flush.console()
+
+  # LSA/SVD (keep this modest)
+  svd_dim <- min(100, n - 1)
+  sv <- irlba::irlba(X_tfidf, nv = svd_dim)
+  Z <- sv$u %*% diag(sv$d)   # dense n x svd_dim
+
+  rm(X, X_tfidf, sv, rs, df2, idf); gc()
+
+  # ----------------------------
+  # D) Candidate neighbors via Annoy
+  # ----------------------------
+  k <- min(200, n - 1)      # practical default
+  if (n > 20000) k <- min(150, n - 1)
+  annoy_trees <- 100
+
+  ann <- RcppAnnoy::AnnoyEuclidean$new(ncol(Z))
+  for (i in seq_len(nrow(Z))) ann$addItem(i - 1, Z[i, ])
+  ann$build(annoy_trees)
+
+  # neighbor list (indices 1..n)
+  neigh_idx <- vector("list", n)
+  for (i in seq_len(n)) {
+    nn <- ann$getNNsByItem(i - 1, k + 1)
+    nn <- nn[nn != (i - 1)] + 1  # drop self, convert to 1-based
+    neigh_idx[[i]] <- nn
+  }
+  rm(Z, ann); gc()
+
+  # Ensure identical phenotype profiles are directly connected (without ancestor smearing)
+dup_groups <- split(seq_along(sig), sig)
+dup_groups <- dup_groups[sapply(dup_groups, length) > 1]
+
+for (g in dup_groups) {
+  # connect within group (bounded)
+  m <- min(length(g), 50L)
+  for (ii in seq_along(g)) {
+    i <- g[ii]
+    # add up to (m-1) other members as neighbors
+    others <- g[g != i]
+    if (length(others) > (m - 1L)) others <- others[seq_len(m - 1L)]
+    neigh_idx[[i]] <- unique(c(neigh_idx[[i]], others))
+  }
+}
+  if (FALSE) {
+  # ----------------------------
+# D2) Augment candidates: all cases sharing at least one HPO term
+#      (fixes "identical single-term cases far apart")
+# ----------------------------
+
+# Build inverted index: term -> case indices
+term2cases <- new.env(parent = emptyenv())
+
+for (i in seq_len(n)) {
+  ts <- anc_sets[[i]]
+  ts <- ts[!is.na(ts)]
+  if (length(ts) == 0) next
+  for (t in unique(ts)) {
+    key <- as.character(t)
+    if (exists(key, envir = term2cases, inherits = FALSE)) {
+      term2cases[[key]] <- c(term2cases[[key]], i)
+    } else {
+      term2cases[[key]] <- i
+    }
+  }
+}
+
+# Add shared-term neighbors to each neigh list (cap to avoid explosion)
+# precompute term frequency over expanded ancestors
+term_freq <- new.env(parent=emptyenv())
+for (i in seq_len(n)) {
+  ts <- anc_sets[[i]]
+  for (t in ts) {
+    key <- as.character(t)
+    term_freq[[key]] <- (if (exists(key, term_freq, inherits=FALSE)) term_freq[[key]] else 0L) + 1L
+  }
+}
+
+cap_for_term <- function(t) {
+  f <- term_freq[[as.character(t)]]
+  if (is.null(f) || is.na(f)) return(50L)
+  as.integer(max(50, min(800, round(2000 / sqrt(as.numeric(f))))))
+}
+
+for (i in seq_len(n)) {
+  ts <- anc_sets[[i]]
+  ts <- ts[!is.na(ts)]
+  if (length(ts) == 0) next
+
+  cand <- integer(0)
+
+for (t in unique(ts)) {
+  key <- as.character(t)
+
+  if (!exists(key, envir = term2cases, inherits = FALSE)) next
+
+  tmp <- term2cases[[key]]
+  tmp <- tmp[tmp != i]
+  tmp <- unique(tmp)
+
+  cap <- cap_for_term(key)          # ✅ call per term
+  if (length(tmp) > cap) tmp <- tmp[seq_len(cap)]  # ✅ cap per term
+
+  cand <- c(cand, tmp)
+}
+
+cand <- unique(cand)
+max_aug <- 500L
+if (length(cand) > max_aug) {
+  set.seed(i)
+  cand <- sample(cand, max_aug)
+}
+neigh_idx[[i]] <- unique(c(neigh_idx[[i]], cand))
+max_total <- 600L
+if (length(neigh_idx[[i]]) > max_total) {
+  set.seed(i)
+  neigh_idx[[i]] <- sample(neigh_idx[[i]], max_total)
+}
+
+}
+rm(term2cases); gc()
+}
+  # ----------------------------
+  # E) Compute Resnik similarity ONLY for candidate pairs -> sparse matrix
+  # ----------------------------
+  information_content <- descendants_IC(hpo)
+
+  ii <- integer(0)
+  jj <- integer(0)
+  vv <- numeric(0)
+
+  # helper: Resnik avg similarity between two term sets (returns scalar)
+    # helper: Resnik avg similarity between two term sets (returns scalar), with caching by phenotype signature
+  resnik_cache <- new.env(parent = emptyenv(), hash = TRUE)
+
+  resnik_avg_pair <- function(ts1, ts2, s1 = NULL, s2 = NULL) {
+    if (is.null(s1)) s1 <- paste(sort(unique(ts1[!is.na(ts1)])), collapse="|")
+    if (is.null(s2)) s2 <- paste(sort(unique(ts2[!is.na(ts2)])), collapse="|")
+
+    key <- if (s1 <= s2) paste0(s1, "||", s2) else paste0(s2, "||", s1)
+
+    if (exists(key, envir = resnik_cache, inherits = FALSE)) {
+      return(resnik_cache[[key]])
+    }
+
+    ts1 <- unique(ts1); ts2 <- unique(ts2)
+    ts1 <- ts1[!is.na(ts1)]; ts2 <- ts2[!is.na(ts2)]
+    if (length(ts1) == 0 || length(ts2) == 0) {
+      resnik_cache[[key]] <- NA_real_
+      return(NA_real_)
+    }
+
+    g <- get_sim_grid(
+      ontology = hpo,
+      information_content = information_content,
+      term_sets = list(ts1, ts2),
+      term_sim_method = "resnik",
+      combine = "average"
+    )
+
+    val <- as.numeric(g[1, 2])
+    resnik_cache[[key]] <- val
+    val
   }
 
-  set.seed(1)
-  custom.settings <- umap.defaults
-  custom.settings$input <- "dist"
-  custom.settings$n_components <- 4
+  cat("Sparse Resnik: start at", format(Sys.time()), "\n"); flush.console()
 
-  res_umap <- umap(as.matrix(max(master_sim_mat) - master_sim_mat) ** 2, config = custom.settings)
-  colnames(res_umap$layout) <- paste0("dim", 1:(custom.settings$n_components))
- 
+  for (i in seq_len(n)) {
+    js <- neigh_idx[[i]]
+    
+    
+    if (length(js) == 0) next
+    tsi <- term_sets[[i]]
+    added_any <- FALSE
+    for (j in js) {
+      if (j <= i) next  # upper triangle only (symmetry)
+      sim <- resnik_avg_pair(tsi, term_sets[[j]], sig[i], sig[j])
+      if (!is.na(sim) && is.finite(sim)) {
+        added_any <- TRUE
+        ii <- c(ii, i)
+        jj <- c(jj, j)
+        vv <- c(vv, sim)
+      }
+    }
+    
+    if (!added_any && length(js) > 0) {
+      # add a tiny edge to the closest candidate to avoid isolated nodes
+      j0 <- js[1]
+      ii <- c(ii, i)
+      jj <- c(jj, j0)
+      vv <- c(vv, 1e-6)
+    }
+    if (i %% 100 == 0) {
+      cat("  computed pairs for i =", i, " / ", n, " at ", format(Sys.time()), "\n")
+      flush.console()
+    }
+  }
 
+  cat("Sparse Resnik: done at", format(Sys.time()), "\n"); flush.console()
+
+  # Build symmetric sparse similarity matrix
+  master_sim_mat <- Matrix::sparseMatrix(i = ii, j = jj, x = vv, dims = c(n, n), dimnames = list(case_ids, case_ids))
+  master_sim_mat <- pmax(master_sim_mat, Matrix::t(master_sim_mat))
+  Matrix::diag(master_sim_mat) <- 1
+
+  # ----------------------------
+# F) Enforce graph connectivity by adding a few "bridge" edges
+# ----------------------------
+if (requireNamespace("igraph", quietly = TRUE)) {
+
+  # adjacency for components (ignore weights, just connectivity)
+  A <- master_sim_mat
+  A@x[A@x != 0] <- 1
+
+  g <- igraph::graph_from_adjacency_matrix(A, mode = "undirected", diag = FALSE)
+  comps <- igraph::components(g)$membership
+  ncomp <- max(comps)
+
+  cat("Graph components:", ncomp, "\n"); flush.console()
+
+  if (ncomp > 1) {
+    # main component = largest
+    comp_sizes <- tabulate(comps, nbins = ncomp)
+    main_comp <- which.max(comp_sizes)
+    main_nodes <- which(comps == main_comp)
+
+    # helper: pick a bridge target in main comp from candidate list
+    pick_bridge_target <- function(i) {
+      cand <- neigh_idx[[i]]
+      cand <- cand[cand %in% main_nodes]
+      if (length(cand) > 0) return(cand[1])
+      # fallback: just pick a deterministic node from main comp
+      main_nodes[1]
+    }
+
+    # Add one bridge per non-main component (very few edges)
+    for (c in setdiff(seq_len(ncomp), main_comp)) {
+      nodes_c <- which(comps == c)
+      i <- nodes_c[1]
+      j <- pick_bridge_target(i)
+
+      # compute a real Resnik similarity for this bridge
+      sim <- resnik_avg_pair(term_sets[[i]], term_sets[[j]], sig[i], sig[j])
+      if (!is.na(sim) && is.finite(sim)) {
+        master_sim_mat[i, j] <- sim
+        master_sim_mat[j, i] <- sim
+      } else {
+        # if sim fails, still add a tiny weight so the graph is connected
+        master_sim_mat[i, j] <- 1e-6
+        master_sim_mat[j, i] <- 1e-6
+      }
+    }
+
+    Matrix::diag(master_sim_mat) <- 1
+  }
+
+} else {
+  cat("igraph not available; skipping connectivity bridges\n"); flush.console()
+}
+
+x_all <- master_sim_mat@x
+
+# exclude diagonal-like 1s and tiny bridge weights from scaling stats
+x_use <- x_all[x_all < 0.999999]
+x_use <- x_use[x_use > 1e-5]
+
+if (length(x_use) > 0) {
+  mn <- as.numeric(stats::quantile(x_use, 0.01))
+  mx <- as.numeric(stats::quantile(x_use, 0.99))
+  if (mx > mn) {
+    x_clamped <- pmin(pmax(x_all, mn), mx)
+    master_sim_mat@x <- (x_clamped - mn) / (mx - mn)
+    master_sim_mat@x <- pmax(master_sim_mat@x, 1e-6)
+  }
+}
+
+Matrix::diag(master_sim_mat) <- 1
+
+
+  saveRDS(master_sim_mat, file = "master_sim_mat_sparse_resnik.rds")
+
+} else {
+  master_sim_mat <- readRDS(file = "master_sim_mat_sparse_resnik.rds")
+}
+
+
+
+# sanity: identical term sets should have similarity > 0
+dup_groups <- split(seq_along(sig), sig)
+dup_groups <- dup_groups[sapply(dup_groups, length) > 1]
+print(length(dup_groups))  # how many duplicated profiles
+
+set.seed(1)
+
+library(uwot)
+
+# Convert similarity -> distance (only on edges)
+D <- master_sim_mat
+max_sim <- max(D@x[D@x < 0.999999])
+D@x <- (max_sim - D@x)^2
+Matrix::diag(D) <- 0
+D <- Matrix::drop0(D, tol = 1e-12)
+
+n <- nrow(D)
+
+# UMAP neighbors: must be <= degree of your sparse graph (k used when building it)
+deg <- Matrix::rowSums(D != 0)
+deg_pos <- deg[deg > 0]
+if (length(deg_pos) == 0) stop("All nodes have zero degree in sparse graph (no edges).")
+
+k_cap <- as.integer(stats::quantile(deg_pos, 0.10))  # 10th percentile degree
+k_cap <- max(10L, min(k_cap, 50L))                   # keep reasonable bounds
+umap_k <- min(k_cap, n - 1)
+
+idx_mat  <- matrix(1L, nrow = n, ncol = umap_k)
+dist_mat <- matrix(1,  nrow = n, ncol = umap_k)
+
+cat("nz==0 count:", sum(Matrix::rowSums(D != 0) == 0), "\n"); flush.console()
+for (i in seq_len(n)) {
+  row_i <- D[i, , drop = FALSE]
+  nz <- which(row_i != 0)
+
+  # If no neighbors (should be rare), connect to a dummy neighbor
+ if (length(nz) == 0) {
+  pool <- setdiff(seq_len(n), i)
+  if (length(pool) >= umap_k) {
+    idx_mat[i, ]  <- sample(pool, umap_k)
+    dist_mat[i, ] <- rep(1, umap_k)
+  } else {
+    idx_mat[i, ]  <- c(pool, sample(pool, umap_k - length(pool), replace = TRUE))
+    dist_mat[i, ] <- rep(1, umap_k)
+  }
+  next
+}
+
+  vals <- as.numeric(row_i[1, nz])  # distances on existing edges
+  o <- order(vals, nz)                  # smallest distance = closest
+
+  take <- min(umap_k, length(nz))
+  sel_idx  <- nz[o[seq_len(take)]]
+  sel_dist <- vals[o[seq_len(take)]]
+
+  # pad if fewer than umap_k
+  if (take < umap_k) {
+  need <- umap_k - take
+  pool <- setdiff(seq_len(n), c(i, sel_idx))
+  if (length(pool) > 0) {
+    extra <- pool[seq_len(min(need, length(pool)))]
+    # use a "far" distance so these are weak links
+    far <- max(sel_dist, 1)
+    sel_idx  <- c(sel_idx, extra)
+    sel_dist <- c(sel_dist, rep(far, length(extra)))
+  }
+  # if still short, fill with random (but not duplicates)
+  if (length(sel_idx) < umap_k) {
+    pool2 <- setdiff(seq_len(n), c(i, sel_idx))
+    if (length(pool2) > 0) {
+      extra2 <- sample(pool2, umap_k - length(sel_idx))
+      far <- max(sel_dist, 1)
+      sel_idx  <- c(sel_idx, extra2)
+      sel_dist <- c(sel_dist, rep(far, length(extra2)))
+    }
+  }
+}
+
+  idx_mat[i, ]  <- as.integer(sel_idx)
+  dist_mat[i, ] <- sel_dist
+}
+
+set.seed(1)
+res_layout <- uwot::umap(
+  X = NULL,
+  n_neighbors  = umap_k,
+  n_components = 4,
+  nn_method    = list(idx = idx_mat, dist = dist_mat),
+  min_dist     = 0.05,
+  spread       = 1.0,
+  n_threads    = 1,
+  verbose      = TRUE
+)
+
+# ---- Deterministic orientation for publication (rigid rotation only) ----
+pc <- prcomp(res_layout, center = TRUE, scale. = FALSE)
+res_layout <- scale(res_layout, center = pc$center, scale = FALSE) %*% pc$rotation
+colnames(res_layout) <- paste0("dim", 1:4)
+
+res_umap <- list(layout = res_layout)
+rownames(res_umap$layout) <- case_ids
 library(future.apply) 
 print("before>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-  TNAMSE_and_HPO <- cbind(TNAMSE_and_HPO, res_umap$layout)
+  umap_df <- as.data.frame(res_umap$layout)
+umap_df$case_ID_paper <- rownames(res_umap$layout)
+
+TNAMSE_and_HPO <- dplyr::left_join(TNAMSE_and_HPO, umap_df, by = "case_ID_paper")
 
   
 print("after>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-TNAMSE_and_HPO<- TNAMSE_and_HPO%>%
-  mutate(dim1=-dim1,
-         dim2=-dim2)
+
 
 ggplot(TNAMSE_and_HPO, aes(x=dim1, y=dim2, color=disease_category)) +
   geom_point(alpha=0.2)
@@ -172,8 +567,10 @@ ggplot(TNAMSE_and_HPO, aes(x=dim1, y=dim2, color=disease_category)) +
  set.seed(1)
  only_HPO<-TNAMSE_and_HPO %>% filter(disease_category == "HPO")
 
+ custom.settings <- umap.defaults
+  custom.settings$input <- "dist"
+  custom.settings$n_components <- 4
  clusters = kcca(only_HPO %>% dplyr::select(one_of(paste0("dim", 1:(custom.settings$n_components)))), k=number_of_clusters, kccaFamily("kmeans"))
- #plot(result_only_disease[,1], result_only_disease[,2], col=rainbow(max(clusters$cluster))[clusters$cluster+1], pch=20)
 
 
 
@@ -202,40 +599,6 @@ cluster_descriptions<-most_frequent_hpos_per_cluster %>%
   mutate(description=paste0(paste(proportion_w_HPO,HPO_Description), collapse = "\n")) %>%
   distinct(cluster,count_of_patients_in_cluster,description)
 
-
-
-# cluster_stats_TNAMSE_cohort<-TNAMSE_and_HPO %>% 
-#   dplyr::filter(disease_category!="HPO" | is.na(disease_category)) %>%
-#   group_by(cluster_pred)%>%
-#   add_count(name="cluster_size")%>%
-#   group_by(cluster_pred,cluster_size)%>%
-#   mutate(is_solved=mean(solved=="solved", na.rm=TRUE)) %>%
-#   distinct(is_solved,cluster_pred,cluster_size)
-
-# cluster_descriptions<- cbind(as.data.frame(cluster_descriptions), clusters@centers)
-# write_tsv(x=cluster_descriptions, "cluster_descriptions.tsv")
-
-#clusters_for_diseases <- read.table("clusters_with_clinical_annotation.txt", sep="\t", header=T)
-#cluster_descriptions$manually_annotated_category<-clusters_for_diseases$Category
-
-
-# TNAMSE_and_HPO <-TNAMSE_and_HPO %>% 
-#   left_join(only_HPO %>% dplyr::select(case_ID_paper, cluster),
-#             by=c("case_ID_paper"="case_ID_paper"), )%>%
-#   left_join(cluster_stats_TNAMSE_cohort,
-#             by=c("cluster_pred"="cluster_pred"), )
-
-# plot_interim<-ggplot()+ theme_minimal() + theme(legend.position="bottom",panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
-#   geom_point(data = TNAMSE_and_HPO %>% filter(disease_category=="HPO"),
-#              aes(x = dim1, y = dim2), alpha=0.5, color="lightgrey") +
-#   geom_point(data = TNAMSE_and_HPO %>% filter(disease_category!="HPO" & !novel_disease_gene),
-#              aes(x = dim1, y = dim2, color = disease_category), size=3) + 
-#   geom_point(data = TNAMSE_and_HPO %>% filter(disease_category!="HPO" & novel_disease_gene),
-#              aes(x = dim1, y = dim2, color = disease_category), shape=17, size=5) + 
-#   geom_label_repel(data = cluster_descriptions, aes(x=dim1, y=dim2, label=description), size=2, color="black", show.legend = FALSE)
-
-# ggsave("plot_w_label.pdf", plot = plot_interim, width=50, height=50, units="cm", dpi=500, useDingbats=FALSE)
-
 plot_interim<-ggplot()+ theme_minimal() + theme(legend.position="bottom",panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
   geom_point(data = TNAMSE_and_HPO %>% filter(disease_category=="HPO"),
              aes(x = dim1, y = dim2), alpha=0.5, color="lightgrey") +
@@ -248,15 +611,9 @@ plot_interim
 
 ggsave("plot_wo_label.pdf", plot = plot_interim, width=25, height=25, units="cm", dpi=500, useDingbats=FALSE)
 
-  #print(TNAMSE_and_HPO)
-  #return(TNAMSE_and_HPO)
-  #print(str(TNAMSE_and_HPO))
+
   print(head(TNAMSE_and_HPO))
-  #write.csv(TNAMSE_and_HPO, "rtnamse.csv")
-  #write.csv(as.data.frame(TNAMSE_and_HPO), "rtnamse_frame.csv")
   TNAMSE_and_HPO[is.null(TNAMSE_and_HPO)] <- NA
-  #TNAMSE_and_HPO <- lapply(TNAMSE_and_HPO, function(x) if (is.null(x)) NA else x)
-  #save(as.data.frame(TNAMSE_and_HPO),file="data.Rda")
   
   library(jsonlite)
 
@@ -272,7 +629,6 @@ TNAMSE_and_HPO_flat[] <- lapply(TNAMSE_and_HPO_flat, function(col) {
 
   # Save the primary data
   write.csv(TNAMSE_and_HPO_flat, paste(lab, "csv", sep="."), row.names = FALSE)
-  #write.csv(cluster_descriptions, "cluster_descriptions.csv", row.names = FALSE)
 
   return(as.data.frame(TNAMSE_and_HPO))
 }

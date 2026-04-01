@@ -23,7 +23,7 @@ RUN apt-get update && \
 RUN R -e "install.packages(c( \
   'Rcpp',\
   'ontologyIndex','ontologySimilarity',\
-  'tidyverse','umap','ggrepel','flexclust','proxy','Matrix','plyr','future','future.apply'\
+  'tidyverse','umap', 'uwot', 'jsonlite', 'ggrepel','flexclust','proxy','Matrix','plyr','future','future.apply'\
   ),\
   repos='https://cloud.r-project.org',\
   Ncpus = parallel::detectCores())"
