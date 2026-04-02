@@ -290,7 +290,7 @@ def plot_umap(request):
 
             # Ensure required columns exist and handle missing data
             # all_cases['mutation'] = all_cases['mutation'].fillna('unknown')
-            all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
+            all_cases['HPO_term_IDs'] = all_cases['HPO_term_IDs'].fillna('unknown')
 
             # Rename columns for clarity
             #all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})

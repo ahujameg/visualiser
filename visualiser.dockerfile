@@ -21,11 +21,14 @@ RUN apt-get update && \
   rm -rf /var/lib/apt/lists/*
 
 RUN R -e "install.packages(c( \
-  'Rcpp',\
-  'ontologyIndex','ontologySimilarity',\
-  'tidyverse','umap', 'uwot', 'jsonlite', 'ggrepel','flexclust','proxy','Matrix','plyr','future','future.apply'\
-  ),\
-  repos='https://cloud.r-project.org',\
+  'Rcpp', \
+  'ontologyIndex','ontologySimilarity', \
+  'irlba','RcppAnnoy','igraph','uwot', \
+  'jsonlite','flexclust', \
+  'dplyr','tidyr', \
+  'Matrix','plyr','future','future.apply' \
+  ), \
+  repos='https://cloud.r-project.org', \
   Ncpus = parallel::detectCores())"
 
 RUN pip install -r requirements.txt
