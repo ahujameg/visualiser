@@ -23,6 +23,9 @@ library(Matrix)
 library(irlba)
 library(RcppAnnoy)
 library(igraph)
+library(dplyr)     
+library(tidyr)      
+library(stringr)
 
 prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
 

@@ -23,7 +23,7 @@ RUN apt-get update && \
 RUN R -e "install.packages(c( \
   'Rcpp', \
   'ontologyIndex','ontologySimilarity', \
-  'irlba','RcppAnnoy','igraph','uwot', \
+  'irlba','RcppAnnoy','igraph','umap','uwot', \
   'jsonlite','flexclust', \
   'dplyr','tidyr', \
   'Matrix','plyr','future','future.apply' \
