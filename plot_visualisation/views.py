@@ -282,15 +282,26 @@ def plot_umap(request):
             #if validation_errors:
             #    return JsonResponse({'error': 'Validation Error', 'details': validation_errors}, status=400)
   
-            all_cases = pd.DataFrame(dataInput['cases'])
             lab = dataInput['lab']
             redo = dataInput['redo']
             selected_case_id = dataInput.get('selected')
-            print(redo)
+            cases_payload = dataInput.get('cases')
+
+            if redo == 'redo':
+                if not isinstance(cases_payload, list) or not cases_payload:
+                    return JsonResponse(
+                        {'error': "Field 'cases' is required when redo='redo'"},
+                        status=400,
+                    )
+                all_cases = pd.DataFrame(cases_payload)
+                all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
+            else:
+                all_cases = pd.DataFrame(cases_payload) if isinstance(cases_payload, list) else pd.DataFrame()
+                if not all_cases.empty and 'HPO_Term_IDs' in all_cases.columns:
+                    all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
 
             # Ensure required columns exist and handle missing data
             # all_cases['mutation'] = all_cases['mutation'].fillna('unknown')
-            all_cases['HPO_term_IDs'] = all_cases['HPO_term_IDs'].fillna('unknown')
 
             # Rename columns for clarity
             #all_cases = all_cases.rename(columns={'age_group': 'adult_child', 'solved': 'solved_candidate'})

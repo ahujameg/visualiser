@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import json
 import os
 import numpy as np 
+from functools import lru_cache
 
 from rpy2.robjects import conversion, default_converter
 
@@ -26,6 +27,7 @@ library(igraph)
 library(dplyr)     
 library(tidyr)      
 library(stringr)
+library(ggplot2)
 
 prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
 
@@ -87,9 +89,6 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
   TNAMSE_and_HPO <- rbind.fill(TNAMSE_data_red, list_of_phenotypes_HPO)
   detach("package:plyr", unload = TRUE)
 
-  # Generate similarity matrix and UMAP embedding
-  information_content <- descendants_IC(hpo)
-  
   print("Checking redo")
   print(redo)
 if (redo == "redo") {
@@ -103,16 +102,8 @@ if (redo == "redo") {
   case_ids <- TNAMSE_cases$case_ID_paper
   term_sets <- TNAMSE_cases$HPO_term_IDs
   
-  # Precompute exact-signature + ancestor-expanded term sets (avoid repeated get_ancestors)
+  # Precompute phenotype signatures for caching repeated Resnik comparisons.
   sig <- vapply(term_sets, function(ts) paste(sort(unique(ts[!is.na(ts)])), collapse="|"), character(1))
-
-  anc_sets <- lapply(term_sets, function(ts) {
-  ts <- unique(ts[!is.na(ts)])
-  if (length(ts) == 0) return(character(0))
-  parents <- unique(unlist(hpo$parents[ts]))
-  out <- unique(c(ts, parents))
-  out[!is.na(out)]
-  })
   names(term_sets) <- case_ids
 
   n <- length(case_ids)
@@ -547,71 +538,10 @@ colnames(res_layout) <- paste0("dim", 1:4)
 
 res_umap <- list(layout = res_layout)
 rownames(res_umap$layout) <- case_ids
-library(future.apply) 
-print("before>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-  umap_df <- as.data.frame(res_umap$layout)
+umap_df <- as.data.frame(res_umap$layout)
 umap_df$case_ID_paper <- rownames(res_umap$layout)
 
 TNAMSE_and_HPO <- dplyr::left_join(TNAMSE_and_HPO, umap_df, by = "case_ID_paper")
-
-  
-print("after>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
-
-
-ggplot(TNAMSE_and_HPO, aes(x=dim1, y=dim2, color=disease_category)) +
-  geom_point(alpha=0.2)
-
-
- number_of_clusters = 80
- set.seed(1)
- only_HPO<-TNAMSE_and_HPO %>% filter(disease_category == "HPO")
-
- custom.settings <- umap.defaults
-  custom.settings$input <- "dist"
-  custom.settings$n_components <- 4
- clusters = kcca(only_HPO %>% dplyr::select(one_of(paste0("dim", 1:(custom.settings$n_components)))), k=number_of_clusters, kccaFamily("kmeans"))
-
-
-
- only_HPO$cluster<-predict(clusters)
- TNAMSE_and_HPO$cluster_pred<-predict(clusters, newdata=TNAMSE_and_HPO %>% dplyr::select(one_of(paste0("dim", 1:(custom.settings$n_components)))))
-
- most_frequent_hpos_per_cluster<-only_HPO %>% group_by(cluster) %>% 
-   add_count(name="count_of_patients_in_cluster") %>%
-   ungroup() %>%
-   unnest_longer(col=HPO_term_IDs) %>% 
-   distinct(HPO_term_IDs,case_ID_paper, .keep_all = TRUE) %>%
-   group_by(cluster,HPO_term_IDs) %>%
-   add_count(name="count_of_HPO_term_in_Cluster")%>%
-   distinct(cluster,HPO_term_IDs,count_of_HPO_term_in_Cluster,count_of_patients_in_cluster) %>%
-   arrange(cluster,-count_of_HPO_term_in_Cluster)%>%
-   mutate(proportion_w_HPO=round(count_of_HPO_term_in_Cluster/count_of_patients_in_cluster, 2))%>%
-   group_by(cluster)%>%
-   slice_max(order_by = count_of_HPO_term_in_Cluster, n = 5, with_ties=FALSE)
-
- most_frequent_hpos_per_cluster$HPO_Description<-sapply(most_frequent_hpos_per_cluster$HPO_term_IDs, function(x) hpo$name[hpo$id==x])
-
-
-
-cluster_descriptions<-most_frequent_hpos_per_cluster %>% 
-  group_by(cluster, count_of_patients_in_cluster) %>%
-  mutate(description=paste0(paste(proportion_w_HPO,HPO_Description), collapse = "\n")) %>%
-  distinct(cluster,count_of_patients_in_cluster,description)
-
-plot_interim<-ggplot()+ theme_minimal() + theme(legend.position="bottom",panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
-  geom_point(data = TNAMSE_and_HPO %>% filter(disease_category=="HPO"),
-             aes(x = dim1, y = dim2), alpha=0.5, color="lightgrey") +
-  geom_point(data = TNAMSE_and_HPO %>% filter(disease_category!="HPO" & !novel_disease_gene),
-             aes(x = dim1, y = dim2, color = disease_category), size=3, shape=19) + 
-  geom_point(data = TNAMSE_and_HPO %>% filter(disease_category!="HPO" & novel_disease_gene),
-             aes(x = dim1, y = dim2, color = disease_category), fill="black", shape=24, size=4.0, stroke=1.5)
-
-plot_interim
-
-ggsave("plot_wo_label.pdf", plot = plot_interim, width=25, height=25, units="cm", dpi=500, useDingbats=FALSE)
-
-
-  print(head(TNAMSE_and_HPO))
   TNAMSE_and_HPO[is.null(TNAMSE_and_HPO)] <- NA
   
   library(jsonlite)
@@ -646,11 +576,167 @@ hpo_obo = f"{args[0]}"
 gene_to_pheno_path = f"{args[1]}"
 #redo = args[2]
 
+@lru_cache(maxsize=1)
+def _load_hpo_mapping():
+    gene_to_pheno = pd.read_csv(gene_to_pheno_path, sep="\t", dtype=str)
+    return dict(zip(gene_to_pheno["HPO_Term_ID"], gene_to_pheno["HPO_Term_Name"]))
+
+@lru_cache(maxsize=8)
+def _load_cached_lab_data(lab_file, mtime_ns):
+    del mtime_ns  # Only used to invalidate the cache when the CSV changes.
+    tnamse_and_hpo = pd.read_csv(lab_file)
+    tnamse_and_hpo["HPO_term_IDs"] = tnamse_and_hpo["HPO_term_IDs"].apply(json.loads)
+    hpo_mapping = _load_hpo_mapping()
+    tnamse_and_hpo["HPO_Names"] = tnamse_and_hpo["HPO_term_IDs"].apply(
+        lambda hpo_list: ", ".join(hpo_mapping.get(hpo, hpo) for hpo in hpo_list)
+        if isinstance(hpo_list, list)
+        else hpo_mapping.get(hpo_list, hpo_list)
+    )
+    return tnamse_and_hpo
+
+
+COLOR_MAP = {
+    "cardiovascular": "rgb(237,125,49)",
+    "endocrine, metabolic, mitochondrial nutritional": "rgb(255,215,0)",
+    "endocrine": "rgb(255,215,0)",
+    "metabolic": "rgb(255, 102, 204)",
+    "mitochondrial nutritional": "rgb(255,215,0)",
+    "neurodevelopmental": "rgb(91,155,213)",
+    "haematopoiesis and immune system": "rgb(112,173,71)",
+    "haematopoiesis/immune system": "rgb(112,173,71)",
+    "organ abnormality": "rgb(196,90,94)",
+    "neurological neuromuscular": "rgb(177,160,199)",
+    "neurological/neuromuscular": "rgb(177,160,199)",
+    "unspecified": "rgb(153, 102, 51)",
+    "other": "rgb(153, 0, 0)",
+}
+
+def _apply_umap_layout(fig):
+    fig.update_layout(
+        legend=dict(
+            x=0.75,
+            y=0.05,
+            bgcolor='rgba(255,255,255,0.5)',
+            bordercolor='Grey',
+            borderwidth=1,
+        ),
+        margin=dict(t=30, r=30, l=30, b=30),
+        title="UMAP Visualization",
+        xaxis_title="dim1",
+        yaxis_title="dim2",
+        autosize=True,
+        width=800,
+        height=600,
+    )
+    return fig
+
+def _build_umap_figure(non_hpo_data, hpo_data):
+    fig = make_subplots()
+
+    text = hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
+    fig.add_trace(go.Scattergl(
+        x=hpo_data['dim1'],
+        y=hpo_data['dim2'],
+        mode='markers',
+        marker=dict(color='lightgrey', opacity=0.35, size=5),
+        name='HPO',
+        hovertext=text,
+        hoverinfo="text",
+    ))
+
+    categories = non_hpo_data['disease_category'].dropna().unique()
+    for category in categories:
+        subset = non_hpo_data[non_hpo_data['disease_category'] == category].copy()
+        if subset.empty:
+            continue
+
+        finite = np.isfinite(subset['dim1'].to_numpy()) & np.isfinite(subset['dim2'].to_numpy())
+        if not finite.any():
+            continue
+        subset = subset.loc[finite]
+
+        hpos_subset = (
+            subset["HPO_Names"]
+            .fillna("")
+            .astype(str)
+            .str.wrap(60)
+            .str.replace("\n", "<br>")
+        )
+        hpos_subset = hpos_subset.replace("", "–")
+
+        text = (
+            "Case ID: " + subset["case_ID_paper"].astype(str) +
+            "<br>HPO Terms: " + hpos_subset
+        )
+
+        fig.add_trace(go.Scattergl(
+            x=subset['dim1'],
+            y=subset['dim2'],
+            mode='markers',
+            marker=dict(size=10, color=COLOR_MAP.get(category, 'gray')),
+            name=category,
+            hovertext=text,
+            hoverinfo="text",
+            hovertemplate="%{hovertext}<extra></extra>",
+        ))
+
+    for trace in fig.data:
+        if trace.name == 'other' or trace.name == 'unspecified':
+            trace.visible = 'legendonly'
+
+    return _apply_umap_layout(fig)
+
+
+@lru_cache(maxsize=8)
+def _build_cached_base_figure(lab_file, mtime_ns):
+    tnamse_and_hpo = _load_cached_lab_data(lab_file, mtime_ns)
+    non_hpo_data = tnamse_and_hpo[tnamse_and_hpo['disease_category'] != 'HPO']
+    hpo_data = tnamse_and_hpo[tnamse_and_hpo['disease_category'] == 'HPO']
+    return _build_umap_figure(non_hpo_data, hpo_data).to_dict()
+
+
+def _add_selected_case_trace(fig, tnamse_and_hpo, selected_case_id):
+    if not selected_case_id:
+        return fig
+
+    selected = tnamse_and_hpo[tnamse_and_hpo['case_ID_paper'].astype(str) == str(selected_case_id)]
+    if selected.empty:
+        return fig
+
+    selected_hpos = (
+        selected["HPO_Names"]
+        .fillna("")
+        .astype(str)
+        .str.wrap(60)
+        .str.replace("\n", "<br>")
+    )
+    text = (
+        "Case ID: " + selected["case_ID_paper"].astype(str) +
+        "<br>HPO Terms: " + selected_hpos
+    )
+    fig.add_trace(go.Scattergl(
+        x=selected['dim1'],
+        y=selected['dim2'],
+        mode='markers',
+        marker=dict(
+            color='red',
+            size=10,
+            line=dict(color='black', width=3),
+        ),
+        name='selected case',
+        hovertext=text,
+        hoverinfo="text",
+        hovertemplate="%{hovertext}<extra></extra>",
+        hoverlabel=dict(
+            font=dict(color='black'),
+            bgcolor='red',
+            bordercolor='black',
+        ),
+    ))
+    return fig
+
 def generate_umap(tnamse_data, lab, selected_case_id, redo):
-    
-    # Read the genes_to_phenotype file and create a mapping dictionary
-    gene_to_pheno = pd.read_csv("genes_to_phenotype.txt", sep="\t", dtype=str)
-    
+
     labFile = lab + ".csv"
 
     # Filter
@@ -685,176 +771,26 @@ def generate_umap(tnamse_data, lab, selected_case_id, redo):
         tnamse_data_r = conversion.py2rpy(tnamse_data)  # Convert Pandas DataFrame to R DataFrame
 
       # Call R function
-      r_result = prepare_data(tnamse_data_r, gene_to_pheno_path, hpo_obo, lab, redo)
-
-
-      #print(r_result)
+      prepare_data(tnamse_data_r, gene_to_pheno_path, hpo_obo, lab, redo)
 
 
     #TNAMSE_and_HPO = r_result
     # Load the data
-    TNAMSE_and_HPO = pd.read_csv(labFile)
-    #cluster_descriptions = pd.read_csv("cluster_descriptions.csv")
-    print("Loaded TNAMSE_and_HPO:", TNAMSE_and_HPO)
-
-    # Create a dictionary mapping HPO Term ID to HPO Term Name
-    hpo_mapping = dict(zip(gene_to_pheno["HPO_Term_ID"], gene_to_pheno["HPO_Term_Name"]))
-
-    # Convert HPO_Term_IDs column from JSON-like string to actual lists
-    TNAMSE_and_HPO["HPO_term_IDs"] = TNAMSE_and_HPO["HPO_term_IDs"].apply(json.loads)
-
-    # Map HPO term IDs to their names
-    TNAMSE_and_HPO["HPO_Names"] = TNAMSE_and_HPO["HPO_term_IDs"].apply(
-      lambda hpo_list: ", ".join([hpo_mapping.get(hpo, hpo) for hpo in hpo_list])
-      if isinstance(hpo_list, list)
-      else hpo_mapping.get(hpo_list, hpo_list)
-    )
+    mtime_ns = os.stat(labFile).st_mtime_ns
+    TNAMSE_and_HPO = _load_cached_lab_data(labFile, mtime_ns).copy()
     
-    #non_hpo_data = TNAMSE_and_HPO[(TNAMSE_and_HPO['disease_category'] != 'HPO')]
-    non_hpo_data = TNAMSE_and_HPO[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['case_ID_paper'].isin(tnamse_data['case_ID_paper']))]
+    if tnamse_data.empty:
+        fig = go.Figure(_build_cached_base_figure(labFile, mtime_ns))
+        return _add_selected_case_trace(fig, TNAMSE_and_HPO, selected_case_id)
+
+    if not tnamse_data.empty and 'case_ID_paper' in tnamse_data.columns:
+        visible_case_ids = set(tnamse_data['case_ID_paper'].dropna().astype(str))
+        non_hpo_data = TNAMSE_and_HPO[
+            (TNAMSE_and_HPO['disease_category'] != 'HPO')
+            & (TNAMSE_and_HPO['case_ID_paper'].astype(str).isin(visible_case_ids))
+        ]
+    else:
+        non_hpo_data = TNAMSE_and_HPO[TNAMSE_and_HPO['disease_category'] != 'HPO']
     hpo_data = TNAMSE_and_HPO[TNAMSE_and_HPO['disease_category'] == 'HPO']
-    #novel_gene_data = TNAMSE_and_HPO[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene'])]
-
-    print("non_hpo_data...", non_hpo_data)
-    # Assign unique colors to each disease category
-    categories = TNAMSE_and_HPO['disease_category'].unique()
-
-    color_map = {
-        "cardiovascular": "rgb(237,125,49)",  # Orange-like color
-        "endocrine, metabolic, mitochondrial nutritional": "rgb(255,215,0)",
-        "endocrine": "rgb(255,215,0)",
-        "metabolic": "rgb(255, 102, 204)",
-        "mitochondrial nutritional": "rgb(255,215,0)",  # Gold
-        "neurodevelopmental": "rgb(91,155,213)",  # Light blue
-        "haematopoiesis and immune system": "rgb(112,173,71)",  # Green
-        "haematopoiesis/immune system": "rgb(112,173,71)",
-        "organ abnormality": "rgb(196,90,94)",  # Pinkish
-        "neurological neuromuscular": "rgb(177,160,199)",
-        "neurological/neuromuscular": "rgb(177,160,199)",   # Light lilac
-        "unspecified": "rgb(153, 102, 51)",
-        "other": "rgb(153, 0, 0)"
-    }
-
-    TNAMSE_and_HPO['color'] = TNAMSE_and_HPO['disease_category'].map(color_map)
-
-    # Re-plot using the rotated dimensions
-    fig = make_subplots()
-
-    text = hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
-    
-    # Add HPO points
-    fig.add_trace(go.Scatter(
-        x=hpo_data['dim1'],
-        y=hpo_data['dim2'],
-        mode='markers',
-        marker=dict(color='lightgrey', opacity=0.5),
-        name='HPO',
-        hovertext=text,  # Assign hover text
-        hoverinfo="text"  # Ensure hover text is displayed
-    ))
-
-    # Add scatter points for each non-HPO disease category  
-    for category in categories:
-        if category == 'HPO':
-            continue
-
-        subset = non_hpo_data[non_hpo_data['disease_category'] == category].copy()
-        if subset.empty:
-            continue
-
-        # Filter out non-finite coordinates so every remaining point can render & hover
-        finite = np.isfinite(subset['dim1'].to_numpy()) & np.isfinite(subset['dim2'].to_numpy())
-        if not finite.any():
-            continue
-        subset = subset.loc[finite]
-
-        # Build per-point hover text from THIS subset (indexes/lengths align)
-        hpos_subset = (
-            subset["HPO_Names"]
-            .fillna("")
-            .astype(str)
-            .str.wrap(60)
-            .str.replace("\n", "<br>")
-        )
-        # If a case has no HPO names, show a placeholder so hover isn’t empty
-        hpos_subset = hpos_subset.replace("", "–")
-
-        text = (
-            "Case ID: " + subset["case_ID_paper"].astype(str) +
-            "<br>HPO Terms: " + hpos_subset
-        )
-
-        fig.add_trace(go.Scatter(
-            x=subset['dim1'],
-            y=subset['dim2'],
-            mode='markers',
-            marker=dict(size=10, color=color_map.get(category, 'gray')),
-            name=category,
-            hovertext=text,       # aligned 1:1 with x/y
-            hoverinfo="text",     # show only the text we provided
-            hovertemplate="%{hovertext}<extra></extra>",  # cleaner hover box
-        ))
-
-    # Add the selected case trace LAST to ensure it is on top
-    if selected_case_id:
-        selected = TNAMSE_and_HPO[TNAMSE_and_HPO['case_ID_paper'] == selected_case_id]
-        if not selected.empty:
-            selected_hpos = (
-                selected["HPO_Names"]
-                .fillna("")
-                .astype(str)
-                .str.wrap(60)
-                .str.replace("\n", "<br>")
-            )
-            text = (
-                "Case ID: " + selected["case_ID_paper"].astype(str) +
-                "<br>HPO Terms: " + selected_hpos
-            )
-            fig.add_trace(go.Scatter(
-                x=selected['dim1'],
-                y=selected['dim2'],
-                mode='markers',
-                marker=dict(
-                    color='red', 
-                    size=10,  # Larger size for visibility
-                    line=dict(color='black', width=3)  # Distinct border
-                ),
-                name='selected case',
-                hovertext=text,       # aligned 1:1 with x/y
-                hoverinfo="text",     # show only the text we provided
-                hovertemplate="%{hovertext}<extra></extra>",  # cleaner hover box
-                hoverlabel=dict(
-                    font=dict(color='black'),  # text color
-                    bgcolor='red',           # optional: background color for contrast
-                    bordercolor='black'        # optional: border
-                )
-            ))
-
-    # Turn off 'other' and 'unspecified' categories by default
-    for trace in fig.data:
-        if trace.name == 'other' or trace.name == 'unspecified':
-            trace.visible = 'legendonly'
-
-    # Add novel gene points
-    # fig.add_trace(go.Scatter(
-    #     x=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim1'],
-    #     y=TNAMSE_and_HPO.loc[(TNAMSE_and_HPO['disease_category'] != 'HPO') & (TNAMSE_and_HPO['novel_disease_gene']), 'dim2'],
-    #     mode='markers',
-    #     marker=dict(color='rgba(255, 0, 0, 0.0)', symbol='triangle-up', line=dict(width=2, color='black'), size=12),
-    #     name='Novel Disease Gene'
-    # ))
-
-    # Position the legend inside the plot (top right)
-    fig.update_layout(
-        legend=dict(
-            x=0.75,       # Horizontal position (0–1, left to right)
-            y=0.05,       # Vertical position (0–1, bottom to top)
-            bgcolor='rgba(255,255,255,0.5)',  # Optional: semi-transparent background
-            bordercolor='Grey',
-            borderwidth=1
-        ),
-        margin=dict(t=30, r=30, l=30, b=30)
-    )
-
-    fig.update_layout(title="UMAP Visualization", xaxis_title="dim1", yaxis_title="dim2", autosize=True, width=800, height=600)
-    return fig
+    fig = _build_umap_figure(non_hpo_data, hpo_data)
+    return _add_selected_case_trace(fig, TNAMSE_and_HPO, selected_case_id)
