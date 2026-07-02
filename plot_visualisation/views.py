@@ -22,6 +22,18 @@ import json
 import pandas as pd
 import numpy as np
 
+def normalize_case_id(value):
+    if value is None or pd.isna(value):
+        return None
+
+    case_id = str(value).strip()
+    if case_id.endswith(".0"):
+        numeric_part = case_id[:-2]
+        if numeric_part.isdigit():
+            return numeric_part
+
+    return case_id
+
 class CsrfExemptSessionAuth(SessionAuthentication):
     def enforce_csrf(self, request):  # disable check
         return
@@ -284,7 +296,7 @@ def plot_umap(request):
   
             lab = dataInput['lab']
             redo = dataInput['redo']
-            selected_case_id = dataInput.get('selected')
+            selected_case_id = normalize_case_id(dataInput.get('selected'))
             cases_payload = dataInput.get('cases')
 
             if redo == 'redo':
@@ -299,6 +311,9 @@ def plot_umap(request):
                 all_cases = pd.DataFrame(cases_payload) if isinstance(cases_payload, list) else pd.DataFrame()
                 if not all_cases.empty and 'HPO_Term_IDs' in all_cases.columns:
                     all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
+
+            if not all_cases.empty and 'case_ID_paper' in all_cases.columns:
+                all_cases['case_ID_paper'] = all_cases['case_ID_paper'].map(normalize_case_id)
 
             # Ensure required columns exist and handle missing data
             # all_cases['mutation'] = all_cases['mutation'].fillna('unknown')

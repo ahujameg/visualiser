@@ -42,6 +42,7 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
   gene_to_pheno <- read.table(gene_to_pheno_path, sep="\t", quote="", stringsAsFactors=FALSE, header=TRUE)
 
   TNAMSE_data <- TNAMSE_data %>% filter(is.na(HPO_Term_IDs)==FALSE)
+  TNAMSE_data$case_ID_paper <- as.character(TNAMSE_data$case_ID_paper)
 
   # Filter non-missing HPO Term IDs
   #TNAMSE_data <- TNAMSE_data %>% filter(!is.na(HPO_Term_IDs))
@@ -99,7 +100,7 @@ if (redo == "redo") {
   TNAMSE_cases <- TNAMSE_and_HPO %>%
     dplyr::distinct(case_ID_paper, .keep_all = TRUE)
 
-  case_ids <- TNAMSE_cases$case_ID_paper
+  case_ids <- as.character(TNAMSE_cases$case_ID_paper)
   term_sets <- TNAMSE_cases$HPO_term_IDs
   
   # Precompute phenotype signatures for caching repeated Resnik comparisons.
@@ -576,6 +577,16 @@ hpo_obo = f"{args[0]}"
 gene_to_pheno_path = f"{args[1]}"
 #redo = args[2]
 
+def _normalize_case_id(value):
+    if value is None or pd.isna(value):
+        return None
+
+    case_id = str(value).strip()
+    if case_id.endswith(".0") and case_id[:-2].isdigit():
+        return case_id[:-2]
+
+    return case_id
+
 @lru_cache(maxsize=1)
 def _load_hpo_mapping():
     gene_to_pheno = pd.read_csv(gene_to_pheno_path, sep="\t", dtype=str)
@@ -584,7 +595,8 @@ def _load_hpo_mapping():
 @lru_cache(maxsize=8)
 def _load_cached_lab_data(lab_file, mtime_ns):
     del mtime_ns  # Only used to invalidate the cache when the CSV changes.
-    tnamse_and_hpo = pd.read_csv(lab_file)
+    tnamse_and_hpo = pd.read_csv(lab_file, dtype={"case_ID_paper": str})
+    tnamse_and_hpo["case_ID_paper"] = tnamse_and_hpo["case_ID_paper"].map(_normalize_case_id)
     tnamse_and_hpo["HPO_term_IDs"] = tnamse_and_hpo["HPO_term_IDs"].apply(json.loads)
     hpo_mapping = _load_hpo_mapping()
     tnamse_and_hpo["HPO_Names"] = tnamse_and_hpo["HPO_term_IDs"].apply(
@@ -630,7 +642,7 @@ def _apply_umap_layout(fig):
     )
     return fig
 
-def _build_umap_figure(non_hpo_data, hpo_data):
+def _build_umap_figure(non_hpo_data, hpo_data, hide_other_unspecified=True):
     fig = make_subplots()
 
     text = hpo_data["HPO_Names"].str.wrap(60).apply(lambda x: x.replace('\n', '<br>'))
@@ -680,9 +692,10 @@ def _build_umap_figure(non_hpo_data, hpo_data):
             hovertemplate="%{hovertext}<extra></extra>",
         ))
 
-    for trace in fig.data:
-        if trace.name == 'other' or trace.name == 'unspecified':
-            trace.visible = 'legendonly'
+    if hide_other_unspecified:
+        for trace in fig.data:
+            if trace.name == 'other' or trace.name == 'unspecified':
+                trace.visible = 'legendonly'
 
     return _apply_umap_layout(fig)
 
@@ -696,10 +709,11 @@ def _build_cached_base_figure(lab_file, mtime_ns):
 
 
 def _add_selected_case_trace(fig, tnamse_and_hpo, selected_case_id):
+    selected_case_id = _normalize_case_id(selected_case_id)
     if not selected_case_id:
         return fig
 
-    selected = tnamse_and_hpo[tnamse_and_hpo['case_ID_paper'].astype(str) == str(selected_case_id)]
+    selected = tnamse_and_hpo[tnamse_and_hpo['case_ID_paper'].map(_normalize_case_id) == selected_case_id]
     if selected.empty:
         return fig
 
@@ -738,6 +752,11 @@ def _add_selected_case_trace(fig, tnamse_and_hpo, selected_case_id):
 def generate_umap(tnamse_data, lab, selected_case_id, redo):
 
     labFile = lab + ".csv"
+    selected_case_id = _normalize_case_id(selected_case_id)
+
+    if not tnamse_data.empty and 'case_ID_paper' in tnamse_data.columns:
+        tnamse_data = tnamse_data.copy()
+        tnamse_data['case_ID_paper'] = tnamse_data['case_ID_paper'].map(_normalize_case_id)
 
     # Filter
     #tnamse_data = tnamse_data[(tnamse_data["disease_category"] != 'unspecified') & (tnamse_data["disease_category"] != 'other')]
@@ -784,10 +803,10 @@ def generate_umap(tnamse_data, lab, selected_case_id, redo):
         return _add_selected_case_trace(fig, TNAMSE_and_HPO, selected_case_id)
 
     if not tnamse_data.empty and 'case_ID_paper' in tnamse_data.columns:
-        visible_case_ids = set(tnamse_data['case_ID_paper'].dropna().astype(str))
+        visible_case_ids = set(tnamse_data['case_ID_paper'].dropna().map(_normalize_case_id))
         non_hpo_data = TNAMSE_and_HPO[
             (TNAMSE_and_HPO['disease_category'] != 'HPO')
-            & (TNAMSE_and_HPO['case_ID_paper'].astype(str).isin(visible_case_ids))
+            & (TNAMSE_and_HPO['case_ID_paper'].map(_normalize_case_id).isin(visible_case_ids))
         ]
     else:
         non_hpo_data = TNAMSE_and_HPO[TNAMSE_and_HPO['disease_category'] != 'HPO']
