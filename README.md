@@ -1,6 +1,10 @@
 # Visualiser
 This is a web application for handling visualisation for HGQN.  
 
+For the HPO category-assignment workflow and instructions to generate the Venn
+diagram and UMAP, see
+[`plot_visualisation/README.md`](plot_visualisation/README.md).
+
 ### Pre-requisites:
 This application works with python version 3.10, make sure it is installed or use the following command to install it:
 ```
@@ -72,4 +76,3 @@ Make sure Docker is installed, you can use the steps mentioned here to install D
 1. Launch the Visualiser server in a browser at http://127.0.0.1:7000
 2. Click on 'Choose Data' button and send it to the HGQN application.
 3. ...Add more steps here..
-
