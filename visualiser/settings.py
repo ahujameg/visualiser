@@ -57,6 +57,7 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "plot_visualisation.middleware.UmapPrivacyMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
@@ -95,7 +96,7 @@ DATABASES = {
 
 
 # Password validation
-# https://docs.djangoproject.com/en/4.2/ref/settings/#auth-password-validators
+# https://docs.djangoproject.com/en/4.2/topics/auth/passwords/#password-validation
 
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -134,6 +135,11 @@ X_FRAME_OPTIONS = "ALLOW-FROM http://127.0.0.1:8000/"
 
 # Configure URL to HGQN REST API
 HGQN_REST_API_URL = "http://web.hgqn/plot" # # # # # # # # TODO: add correct API here
+
+# Only the trusted HGQN backend should know/send this token. The browser must not
+# receive it. With an empty value, UMAP case IDs remain hidden unless the
+# visualiser session itself belongs to a Django staff/superuser account.
+HGQN_VISUALISER_ADMIN_TOKEN = env("HGQN_VISUALISER_ADMIN_TOKEN", default="")
 
 CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
