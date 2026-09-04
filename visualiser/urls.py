@@ -16,7 +16,15 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from plot_visualisation.views import index, plot_view, plot_api, plot_age_bar, plot_umap, plot_trend
+from plot_visualisation.views import (
+    index,
+    plot_view,
+    plot_api,
+    plot_age_bar,
+    plot_umap,
+    plot_umap_recompute,
+    plot_trend,
+)
 from plot_visualisation import urls as faceSender_urls
 
 urlpatterns = [
@@ -27,5 +35,8 @@ urlpatterns = [
     path('api/plot/bar', plot_api, name='plot_api'),  # Expose the API endpoint at /api/plot/
     path('api/plot/age_bar/', plot_age_bar, name='plot_age_bar'),
     path('api/plot/umap/', plot_umap, name='plot_umap'),
+    # Fire-and-forget: starts the (up to ~46h) full redo as a detached process
+    # and returns 202 immediately, so it never occupies a gunicorn worker.
+    path('api/plot/umap/recompute/', plot_umap_recompute, name='plot_umap_recompute'),
     path('api/plot/trend/', plot_trend, name='plot_trend'),
 ]

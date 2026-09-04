@@ -1,4 +1,8 @@
 import json
+import os
+import sys
+import subprocess
+import tempfile
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -348,6 +352,54 @@ def plot_umap(request):
             return JsonResponse({'error': 'Invalid JSON data'}, status=400)
 
     return JsonResponse({'error': 'Invalid request method'}, status=405)
+
+
+@csrf_exempt
+@api_view(["POST"])
+def plot_umap_recompute(request):
+    """Kick off a full UMAP redo (sparse Resnik + uwot) as a detached process
+    and return immediately.
+
+    This has taken up to ~46h on the test server, so it must never run inside
+    a gunicorn worker: a worker's --timeout would kill it, and while it holds
+    the worker no other request can be served. The child process is started
+    with start_new_session=True so it survives worker restarts/timeouts and
+    keeps running until it finishes (or the container itself is restarted).
+    Progress/errors go to recompute_umap.log; the result lands in <lab>.csv,
+    which plot_umap's normal (non-redo) path reads.
+    """
+    try:
+        data = json.loads(request.body)
+    except json.JSONDecodeError:
+        return JsonResponse({'error': 'Invalid JSON data'}, status=400)
+
+    if not isinstance(data, dict):
+        return JsonResponse({'error': 'Invalid JSON data'}, status=400)
+
+    lab = data.get('lab', 'allLabs')
+    cases = data.get('cases')
+    if not isinstance(cases, list) or not cases:
+        return JsonResponse({'error': "Field 'cases' is required"}, status=400)
+
+    apps_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    fd, payload_path = tempfile.mkstemp(
+        prefix="umap_recompute_", suffix=".json", dir=apps_dir
+    )
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"lab": lab, "cases": cases}, fh)
+
+    log_path = os.path.join(apps_dir, "recompute_umap.log")
+    with open(log_path, "ab") as log_fh:
+        subprocess.Popen(
+            [sys.executable, "manage.py", "recompute_umap", "--payload", payload_path],
+            cwd=apps_dir,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach from this gunicorn worker
+        )
+
+    return JsonResponse({"status": "started", "lab": lab}, status=202)
+
 
 @csrf_exempt
 @api_view(["POST"])

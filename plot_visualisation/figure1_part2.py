@@ -607,20 +607,27 @@ def _load_cached_lab_data(lab_file, mtime_ns):
     return tnamse_and_hpo
 
 
+# Colorblind-safe categorical palette (Okabe-Ito, extended with a few
+# well-separated extras for brown/purple/teal/gray/olive). Every semantic
+# category below gets its own distinct hue -- previously "endocrine, metabolic,
+# mitochondrial nutritional", "endocrine" and "mitochondrial nutritional" all
+# shared the same gold rgb(255,215,0), making them indistinguishable in the
+# UMAP legend. Synonym keys (e.g. the "/" vs "and" spellings) intentionally
+# keep the same color as each other -- they're the same category.
 COLOR_MAP = {
-    "cardiovascular": "rgb(237,125,49)",
-    "endocrine, metabolic, mitochondrial nutritional": "rgb(255,215,0)",
-    "endocrine": "rgb(255,215,0)",
-    "metabolic": "rgb(255, 102, 204)",
-    "mitochondrial nutritional": "rgb(255,215,0)",
-    "neurodevelopmental": "rgb(91,155,213)",
-    "haematopoiesis and immune system": "rgb(112,173,71)",
-    "haematopoiesis/immune system": "rgb(112,173,71)",
-    "organ abnormality": "rgb(196,90,94)",
-    "neurological neuromuscular": "rgb(177,160,199)",
-    "neurological/neuromuscular": "rgb(177,160,199)",
-    "unspecified": "rgb(153, 102, 51)",
-    "other": "rgb(153, 0, 0)",
+    "cardiovascular": "rgb(230,159,0)",                               # orange
+    "endocrine, metabolic, mitochondrial nutritional": "rgb(127,127,127)",  # gray (mixed/catch-all)
+    "endocrine": "rgb(240,228,66)",                                   # yellow
+    "metabolic": "rgb(204,121,167)",                                  # pink/magenta
+    "mitochondrial nutritional": "rgb(23,190,207)",                   # teal
+    "neurodevelopmental": "rgb(0,114,178)",                           # blue
+    "haematopoiesis and immune system": "rgb(0,158,115)",             # green
+    "haematopoiesis/immune system": "rgb(0,158,115)",                 # green
+    "organ abnormality": "rgb(140,86,75)",                            # brown
+    "neurological neuromuscular": "rgb(148,103,189)",                 # purple
+    "neurological/neuromuscular": "rgb(148,103,189)",                 # purple
+    "unspecified": "rgb(188,189,34)",                                 # olive
+    "other": "rgb(213,94,0)",                                         # vermillion
 }
 
 def _apply_umap_layout(fig):
