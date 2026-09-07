@@ -13,7 +13,7 @@ from rest_framework.views import APIView
 from django.db.models.fields.json import JSONField
 from django.conf import settings
 from django.contrib import messages
-from plot_visualisation.figure1_part2 import generate_umap
+from plot_visualisation.figure1_part2 import generate_umap, lab_csv_path, CACHE_DIR
 
 # or for a class-based DRF view
 from rest_framework.authentication import SessionAuthentication
@@ -31,7 +31,9 @@ _APPS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def _recompute_lock_path(lab):
-    return os.path.join(_APPS_DIR, f".recompute_{lab}.lock")
+    # On CACHE_DIR (a mounted volume in prod) so the lock/log survive a container
+    # restart alongside the artifacts the recompute produces.
+    return os.path.join(CACHE_DIR, f".recompute_{lab}.lock")
 
 
 def _pid_is_running(pid):
@@ -85,12 +87,12 @@ def start_umap_recompute(lab, cases):
         return "already_running"
 
     fd, payload_path = tempfile.mkstemp(
-        prefix="umap_recompute_", suffix=".json", dir=_APPS_DIR
+        prefix="umap_recompute_", suffix=".json", dir=CACHE_DIR
     )
     with os.fdopen(fd, "w") as fh:
         json.dump({"lab": lab, "cases": cases}, fh)
 
-    log_path = os.path.join(_APPS_DIR, "recompute_umap.log")
+    log_path = os.path.join(CACHE_DIR, "recompute_umap.log")
     with open(log_path, "ab") as log_fh:
         proc = subprocess.Popen(
             [sys.executable, "manage.py", "recompute_umap",
@@ -391,7 +393,7 @@ def plot_umap(request):
             # the test server -- it must never run inside this request/worker.
             # Hand it off to a detached process instead and tell the caller
             # to retry once it's done.
-            needs_redo = redo == 'redo' or not os.path.isfile(lab + ".csv")
+            needs_redo = redo == 'redo' or not os.path.isfile(lab_csv_path(lab))
             if needs_redo:
                 if not isinstance(cases_payload, list) or not cases_payload:
                     return JsonResponse(
@@ -542,7 +544,13 @@ def plot_trend(request):
     required = {'solved', 'year'} | ({'quarter'} if resolution == 'quarter' else {'month'})
     missing = [c for c in required if c not in df.columns]
     if missing:
-        return JsonResponse({'error': f"Missing required fields: {', '.join(missing)}"}, status=400)
+        # Happens e.g. when the resolution toggle is switched before a year is
+        # picked, so the rows were built for the other resolution (no quarter/
+        # month column). Return an empty chart, not a 400 -- same as the other
+        # degenerate cases above -- so the client shows a blank plot and the
+        # visualiser log isn't spammed with "Bad Request: /api/plot/trend/".
+        fig = px.line(title="Diagnostic Yield Trend (no data)")
+        return JsonResponse(json.loads(pio.to_json(fig)), safe=False)
 
     df = df.dropna(subset=list(required)).copy()
     if df.empty:

@@ -36,7 +36,12 @@ library(tidyr)
 library(stringr)
 library(ggplot2)
 
-prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
+prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo, cache_dir) {
+
+  # Diagnostics: every case id we were handed, so we can report which ones get
+  # dropped later and why (grep "[recompute]" in recompute_umap.log).
+  .input_case_ids <- unique(as.character(TNAMSE_data$case_ID_paper))
+  cat(sprintf("[recompute] input: %d case(s)\n", length(.input_case_ids))); flush.console()
 
   hpo<-get_ontology(hpo_obo)
   blacklist_hpos = c("HP:0000006", "HP:0000007", "HP:0001417", "HP:0001419", "HP:0001423", "HP:0001428", "HP:0001450", "HP:0040284", "HP:0040283")
@@ -70,6 +75,16 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo) {
     HPO_term_IDs = list(unique(HPO_Term_IDs)),
     .groups = "drop"
   )
+
+  # Diagnostics: cases whose HPO annotations were all missing, obsolete, or not
+  # descendants of HP:0000118 ("Phenotypic abnormality") -- they have nothing to
+  # embed and are absent from <lab>.csv entirely (no coordinates at all).
+  .dropped_no_pheno <- setdiff(.input_case_ids, unique(as.character(TNAMSE_data_red$case_ID_paper)))
+  if (length(.dropped_no_pheno) > 0) {
+    cat(sprintf("[recompute] DROPPED %d case(s) - no usable phenotype (HP:0000118) terms: %s\n",
+                length(.dropped_no_pheno), paste(.dropped_no_pheno, collapse=", ")))
+    flush.console()
+  }
 
   # Process gene-to-phenotype data
   gene_to_pheno <- gene_to_pheno[gene_to_pheno$HPO_Term_ID %in% hpos_to_keep,]
@@ -437,10 +452,10 @@ if (length(x_use) > 0) {
 Matrix::diag(master_sim_mat) <- 1
 
 
-  saveRDS(master_sim_mat, file = "master_sim_mat_sparse_resnik.rds")
+  saveRDS(master_sim_mat, file = file.path(cache_dir, "master_sim_mat_sparse_resnik.rds"))
 
 } else {
-  master_sim_mat <- readRDS(file = "master_sim_mat_sparse_resnik.rds")
+  master_sim_mat <- readRDS(file = file.path(cache_dir, "master_sim_mat_sparse_resnik.rds"))
 }
 
 
@@ -476,12 +491,14 @@ idx_mat  <- matrix(1L, nrow = n, ncol = umap_k)
 dist_mat <- matrix(1,  nrow = n, ncol = umap_k)
 
 cat("nz==0 count:", sum(Matrix::rowSums(D != 0) == 0), "\n"); flush.console()
+.isolated_ids <- character(0)   # diagnostics: cases with no similarity edges
 for (i in seq_len(n)) {
   row_i <- D[i, , drop = FALSE]
   nz <- which(row_i != 0)
 
   # If no neighbors (should be rare), connect to a dummy neighbor
  if (length(nz) == 0) {
+  .isolated_ids <- c(.isolated_ids, case_ids[i])
   pool <- setdiff(seq_len(n), i)
   if (length(pool) >= umap_k) {
     idx_mat[i, ]  <- sample(pool, umap_k)
@@ -527,6 +544,12 @@ for (i in seq_len(n)) {
   dist_mat[i, ] <- sel_dist
 }
 
+if (length(.isolated_ids) > 0) {
+  cat(sprintf("[recompute] %d case(s) had no similarity edges - placed at random (isolated): %s\n",
+              length(.isolated_ids), paste(.isolated_ids, collapse=", ")))
+  flush.console()
+}
+
 set.seed(1)
 res_layout <- uwot::umap(
   X = NULL,
@@ -551,6 +574,22 @@ umap_df$case_ID_paper <- rownames(res_umap$layout)
 
 TNAMSE_and_HPO <- dplyr::left_join(TNAMSE_and_HPO, umap_df, by = "case_ID_paper")
   TNAMSE_and_HPO[is.null(TNAMSE_and_HPO)] <- NA
+
+  # Diagnostics: cases that made it into <lab>.csv but have no dim1/dim2 (the
+  # embedding did not place them) -- they exist in the file but render as no
+  # point and cannot be highlighted.
+  .no_coords <- TNAMSE_and_HPO %>%
+    dplyr::filter(is.na(disease_category) | disease_category != "HPO") %>%
+    dplyr::filter(is.na(dim1)) %>%
+    dplyr::pull(case_ID_paper) %>% unique() %>% as.character()
+  if (length(.no_coords) > 0) {
+    cat(sprintf("[recompute] %d case(s) written to %s.csv WITHOUT coordinates: %s\n",
+                length(.no_coords), lab, paste(.no_coords, collapse=", ")))
+    flush.console()
+  }
+  cat(sprintf("[recompute] done: %d input -> %d placed with coordinates\n",
+              length(.input_case_ids),
+              length(unique(as.character(umap_df$case_ID_paper))))); flush.console()
   
   library(jsonlite)
 
@@ -565,7 +604,7 @@ TNAMSE_and_HPO_flat[] <- lapply(TNAMSE_and_HPO_flat, function(col) {
 })
 
   # Save the primary data
-  write.csv(TNAMSE_and_HPO_flat, paste(lab, "csv", sep="."), row.names = FALSE)
+  write.csv(TNAMSE_and_HPO_flat, file.path(cache_dir, paste(lab, "csv", sep=".")), row.names = FALSE)
 
   return(as.data.frame(TNAMSE_and_HPO))
 }
@@ -583,6 +622,21 @@ args = [
 hpo_obo = f"{args[0]}"
 gene_to_pheno_path = f"{args[1]}"
 #redo = args[2]
+
+# Where the generated layout artifacts (<lab>.csv, master_sim_mat_sparse_resnik.rds)
+# are read from and written to. Point VISUALISER_CACHE_DIR at a mounted volume in
+# production so a `docker compose build` doesn't wipe them and force a fresh
+# multi-hour recompute on every deploy. Defaults to the app directory, which
+# preserves the previous behaviour for a bare `manage.py runserver`.
+CACHE_DIR = os.environ.get(
+    "VISUALISER_CACHE_DIR",
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+)
+
+
+def lab_csv_path(lab):
+    """Absolute path of the cached layout CSV for a lab (e.g. allLabs.csv)."""
+    return os.path.join(CACHE_DIR, f"{lab}.csv")
 
 def _normalize_case_id(value):
     if value is None or pd.isna(value):
@@ -729,7 +783,23 @@ def _add_selected_case_trace(fig, tnamse_and_hpo, selected_case_id):
 
     selected = tnamse_and_hpo[tnamse_and_hpo['case_ID_paper'].map(_normalize_case_id) == selected_case_id]
     if selected.empty:
+        print(
+            f"[umap] selected case {selected_case_id!r} is not in the layout "
+            f"({CACHE_DIR}) - no highlight drawn. It was likely dropped in the last "
+            f"recompute; grep '[recompute]' in recompute_umap.log for the reason.",
+            flush=True,
+        )
         return fig
+
+    finite = np.isfinite(selected['dim1'].to_numpy()) & np.isfinite(selected['dim2'].to_numpy())
+    if not finite.any():
+        print(
+            f"[umap] selected case {selected_case_id!r} is in the layout but has no "
+            f"coordinates (dim1/dim2 are NaN) - no highlight drawn.",
+            flush=True,
+        )
+        return fig
+    selected = selected.loc[finite]
 
     selected_hpos = (
         selected["HPO_Names"]
@@ -765,7 +835,7 @@ def _add_selected_case_trace(fig, tnamse_and_hpo, selected_case_id):
 
 def generate_umap(tnamse_data, lab, selected_case_id, redo):
 
-    labFile = lab + ".csv"
+    labFile = lab_csv_path(lab)
     selected_case_id = _normalize_case_id(selected_case_id)
 
     if not tnamse_data.empty and 'case_ID_paper' in tnamse_data.columns:
@@ -810,7 +880,7 @@ def generate_umap(tnamse_data, lab, selected_case_id, redo):
         tnamse_data_r = conversion.py2rpy(tnamse_data)  # Convert Pandas DataFrame to R DataFrame
 
       # Call R function
-      prepare_data(tnamse_data_r, gene_to_pheno_path, hpo_obo, lab, redo)
+      prepare_data(tnamse_data_r, gene_to_pheno_path, hpo_obo, lab, redo, CACHE_DIR)
 
 
     #TNAMSE_and_HPO = r_result
