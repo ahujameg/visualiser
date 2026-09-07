@@ -1,18 +1,25 @@
-# Required for ontology parsing and similarity measures
-import rpy2.robjects as robjects
-from rpy2.robjects import pandas2ri
+# Note: rpy2 is imported lazily, inside generate_umap()'s redo branch, not
+# here at module level. rpy2 initializes the embedded R interpreter as soon
+# as it's imported, in whatever thread does the importing -- if that happens
+# in a gunicorn worker thread (gthread worker, or just the thread that first
+# imports this module) rather than the process's actual main thread, R prints
+# "R is not initialized by the main thread" and its signal handling / thread
+# safety guarantees break, since R itself is not thread-safe. The redo branch
+# below now only ever runs inside the standalone `recompute_umap` management
+# command process (a plain single-threaded process), never inside a
+# gunicorn request-serving worker -- see plot_visualisation.views.plot_umap's
+# needs_redo guard. Keeping the import lazy means serving workers, which
+# never call into R, never touch rpy2/R at all.
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import json
 import os
-import numpy as np 
+import numpy as np
 from functools import lru_cache
 
-from rpy2.robjects import conversion, default_converter
 
-    
 # R Script for Data Preparation
 r_script = """
 library(ontologyIndex)
@@ -768,7 +775,13 @@ def generate_umap(tnamse_data, lab, selected_case_id, redo):
     # Filter
     #tnamse_data = tnamse_data[(tnamse_data["disease_category"] != 'unspecified') & (tnamse_data["disease_category"] != 'other')]
 
-    if redo == 'redo' or not os.path.isfile(labFile) : 
+    if redo == 'redo' or not os.path.isfile(labFile) :
+
+      # Imported here, not at module level -- see the comment at the top of
+      # this file. This branch must only ever be reached from the standalone
+      # recompute_umap process, never from a request-serving gunicorn worker.
+      import rpy2.robjects as robjects
+      from rpy2.robjects import pandas2ri, conversion, default_converter
 
       # Activate automatic conversion
       pandas2ri.activate()

@@ -26,6 +26,87 @@ import json
 import pandas as pd
 import numpy as np
 
+# Directory containing manage.py (two levels up from this file).
+_APPS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _recompute_lock_path(lab):
+    return os.path.join(_APPS_DIR, f".recompute_{lab}.lock")
+
+
+def _pid_is_running(pid):
+    try:
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def _recompute_already_running(lab):
+    """True if a recompute_umap process for this lab is still alive.
+
+    Clears the lock file itself if the pid it names is gone (crashed run, or
+    one that finished without cleaning up after itself).
+    """
+    lock_path = _recompute_lock_path(lab)
+    try:
+        with open(lock_path) as fh:
+            pid = int(fh.read().strip())
+    except (OSError, ValueError):
+        return False
+
+    if _pid_is_running(pid):
+        return True
+
+    try:
+        os.remove(lock_path)
+    except OSError:
+        pass
+    return False
+
+
+def start_umap_recompute(lab, cases):
+    """Start the (up to ~46h) full UMAP redo as a detached OS process.
+
+    Never call generate_umap(..., redo='redo') directly from a request
+    handler: that runs the sparse-Resnik/uwot pipeline in-process, which
+    would hold the gunicorn worker for the entire duration (or get killed by
+    --timeout partway through). This spawns plot_visualisation's
+    recompute_umap management command instead, detached via
+    start_new_session=True so it outlives worker restarts/timeouts, and
+    writes <lab>.csv when done for the normal (non-redo) path to read.
+
+    Returns "started" or "already_running" (a recompute for this lab is
+    already in flight -- avoids piling up duplicate multi-hour R processes
+    on a memory-constrained box, e.g. if several interactive requests hit a
+    missing cache file at the same time).
+    """
+    if _recompute_already_running(lab):
+        return "already_running"
+
+    fd, payload_path = tempfile.mkstemp(
+        prefix="umap_recompute_", suffix=".json", dir=_APPS_DIR
+    )
+    with os.fdopen(fd, "w") as fh:
+        json.dump({"lab": lab, "cases": cases}, fh)
+
+    log_path = os.path.join(_APPS_DIR, "recompute_umap.log")
+    with open(log_path, "ab") as log_fh:
+        proc = subprocess.Popen(
+            [sys.executable, "manage.py", "recompute_umap",
+             "--payload", payload_path, "--lock", _recompute_lock_path(lab)],
+            cwd=_APPS_DIR,
+            stdout=log_fh,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,  # detach from this gunicorn worker
+        )
+
+    with open(_recompute_lock_path(lab), "w") as fh:
+        fh.write(str(proc.pid))
+
+    return "started"
+
+
 def normalize_case_id(value):
     if value is None or pd.isna(value):
         return None
@@ -303,18 +384,36 @@ def plot_umap(request):
             selected_case_id = normalize_case_id(dataInput.get('selected'))
             cases_payload = dataInput.get('cases')
 
-            if redo == 'redo':
+            # generate_umap() would otherwise run the full sparse-Resnik/uwot
+            # rebuild in-process whenever redo == 'redo' OR <lab>.csv doesn't
+            # exist yet (e.g. right after a fresh deploy, when the cache files
+            # haven't been generated). That rebuild has taken up to ~46h on
+            # the test server -- it must never run inside this request/worker.
+            # Hand it off to a detached process instead and tell the caller
+            # to retry once it's done.
+            needs_redo = redo == 'redo' or not os.path.isfile(lab + ".csv")
+            if needs_redo:
                 if not isinstance(cases_payload, list) or not cases_payload:
                     return JsonResponse(
-                        {'error': "Field 'cases' is required when redo='redo'"},
-                        status=400,
+                        {
+                            'error': "UMAP data for this lab hasn't been generated yet, "
+                                     "and 'cases' was not provided to start building it."
+                        },
+                        status=409,
                     )
-                all_cases = pd.DataFrame(cases_payload)
+                status = start_umap_recompute(lab, cases_payload)
+                return JsonResponse(
+                    {
+                        'status': 'computing',
+                        'detail': status,
+                        'message': 'UMAP data is being generated in the background; retry shortly.',
+                    },
+                    status=202,
+                )
+
+            all_cases = pd.DataFrame(cases_payload) if isinstance(cases_payload, list) else pd.DataFrame()
+            if not all_cases.empty and 'HPO_Term_IDs' in all_cases.columns:
                 all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
-            else:
-                all_cases = pd.DataFrame(cases_payload) if isinstance(cases_payload, list) else pd.DataFrame()
-                if not all_cases.empty and 'HPO_Term_IDs' in all_cases.columns:
-                    all_cases['HPO_Term_IDs'] = all_cases['HPO_Term_IDs'].fillna('unknown')
 
             if not all_cases.empty and 'case_ID_paper' in all_cases.columns:
                 all_cases['case_ID_paper'] = all_cases['case_ID_paper'].map(normalize_case_id)
@@ -362,11 +461,10 @@ def plot_umap_recompute(request):
 
     This has taken up to ~46h on the test server, so it must never run inside
     a gunicorn worker: a worker's --timeout would kill it, and while it holds
-    the worker no other request can be served. The child process is started
-    with start_new_session=True so it survives worker restarts/timeouts and
-    keeps running until it finishes (or the container itself is restarted).
-    Progress/errors go to recompute_umap.log; the result lands in <lab>.csv,
-    which plot_umap's normal (non-redo) path reads.
+    the worker no other request can be served. See start_umap_recompute()
+    above -- the same helper backs plot_umap's needs_redo guard, so both the
+    monthly HGQN cron call and an interactive request hitting a missing cache
+    file go through one code path and share the same duplicate-run lock.
     """
     try:
         data = json.loads(request.body)
@@ -381,24 +479,8 @@ def plot_umap_recompute(request):
     if not isinstance(cases, list) or not cases:
         return JsonResponse({'error': "Field 'cases' is required"}, status=400)
 
-    apps_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    fd, payload_path = tempfile.mkstemp(
-        prefix="umap_recompute_", suffix=".json", dir=apps_dir
-    )
-    with os.fdopen(fd, "w") as fh:
-        json.dump({"lab": lab, "cases": cases}, fh)
-
-    log_path = os.path.join(apps_dir, "recompute_umap.log")
-    with open(log_path, "ab") as log_fh:
-        subprocess.Popen(
-            [sys.executable, "manage.py", "recompute_umap", "--payload", payload_path],
-            cwd=apps_dir,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # detach from this gunicorn worker
-        )
-
-    return JsonResponse({"status": "started", "lab": lab}, status=202)
+    status = start_umap_recompute(lab, cases)
+    return JsonResponse({"status": "started", "detail": status, "lab": lab}, status=202)
 
 
 @csrf_exempt

@@ -57,6 +57,10 @@ MIDDLEWARE = [
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
     "django.contrib.auth.middleware.AuthenticationMiddleware",
+    # Redacts "Case ID: <id>" from UMAP hover text unless the HGQN proxy said
+    # the caller may see identifiers (can_view_case_ids). Must sit BELOW
+    # GZipMiddleware so it edits the response before it is compressed.
+    "plot_visualisation.middleware.UmapPrivacyMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
 ]
