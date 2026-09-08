@@ -44,29 +44,6 @@ def _pid_is_running(pid):
     return True
 
 
-def _recompute_already_running(lab):
-    """True if a recompute_umap process for this lab is still alive.
-
-    Clears the lock file itself if the pid it names is gone (crashed run, or
-    one that finished without cleaning up after itself).
-    """
-    lock_path = _recompute_lock_path(lab)
-    try:
-        with open(lock_path) as fh:
-            pid = int(fh.read().strip())
-    except (OSError, ValueError):
-        return False
-
-    if _pid_is_running(pid):
-        return True
-
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass
-    return False
-
-
 def start_umap_recompute(lab, cases):
     """Start the (up to ~46h) full UMAP redo as a detached OS process.
 
@@ -78,35 +55,65 @@ def start_umap_recompute(lab, cases):
     start_new_session=True so it outlives worker restarts/timeouts, and
     writes <lab>.csv when done for the normal (non-redo) path to read.
 
-    Returns "started" or "already_running" (a recompute for this lab is
-    already in flight -- avoids piling up duplicate multi-hour R processes
-    on a memory-constrained box, e.g. if several interactive requests hit a
-    missing cache file at the same time).
+    Returns "started" or "already_running". The lock file is created with
+    O_CREAT|O_EXCL, so two requests arriving at the same moment (e.g. the
+    HGQN backend firing its startup hook and monthly cron together, across
+    two gunicorn workers) cannot both win -- exactly one spawns the R job,
+    the rest get "already_running". A stale lock (pid no longer alive) is
+    cleared and retried.
     """
-    if _recompute_already_running(lab):
-        return "already_running"
+    lock_path = _recompute_lock_path(lab)
 
-    fd, payload_path = tempfile.mkstemp(
-        prefix="umap_recompute_", suffix=".json", dir=CACHE_DIR
-    )
-    with os.fdopen(fd, "w") as fh:
-        json.dump({"lab": lab, "cases": cases}, fh)
+    for _attempt in range(3):
+        try:
+            lock_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            try:
+                pid = int((open(lock_path).read().strip() or "0"))
+            except (OSError, ValueError):
+                pid = 0
+            if pid == 0 or _pid_is_running(pid):
+                # Held: either a live recompute, or a winner that created the
+                # lock microseconds ago and hasn't written its pid yet.
+                return "already_running"
+            try:
+                os.remove(lock_path)  # stale: pid is dead
+            except FileNotFoundError:
+                pass
+            continue  # retry the atomic create
 
-    log_path = os.path.join(CACHE_DIR, "recompute_umap.log")
-    with open(log_path, "ab") as log_fh:
-        proc = subprocess.Popen(
-            [sys.executable, "manage.py", "recompute_umap",
-             "--payload", payload_path, "--lock", _recompute_lock_path(lab)],
-            cwd=_APPS_DIR,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # detach from this gunicorn worker
-        )
+        # We hold the lock. Park our own pid in it until the child pid is known,
+        # so a concurrent caller sees it as held rather than empty.
+        os.write(lock_fd, str(os.getpid()).encode())
+        os.close(lock_fd)
+        try:
+            fd, payload_path = tempfile.mkstemp(
+                prefix="umap_recompute_", suffix=".json", dir=CACHE_DIR
+            )
+            with os.fdopen(fd, "w") as fh:
+                json.dump({"lab": lab, "cases": cases}, fh)
 
-    with open(_recompute_lock_path(lab), "w") as fh:
-        fh.write(str(proc.pid))
+            log_path = os.path.join(CACHE_DIR, "recompute_umap.log")
+            with open(log_path, "ab") as log_fh:
+                proc = subprocess.Popen(
+                    [sys.executable, "manage.py", "recompute_umap",
+                     "--payload", payload_path, "--lock", lock_path],
+                    cwd=_APPS_DIR,
+                    stdout=log_fh,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,  # detach from this gunicorn worker
+                )
+            with open(lock_path, "w") as fh:
+                fh.write(str(proc.pid))
+            return "started"
+        except BaseException:
+            try:
+                os.remove(lock_path)
+            except OSError:
+                pass
+            raise
 
-    return "started"
+    return "already_running"
 
 
 def normalize_case_id(value):
