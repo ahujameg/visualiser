@@ -375,7 +375,13 @@ rm(term2cases); gc()
 
   # Build symmetric sparse similarity matrix
   master_sim_mat <- Matrix::sparseMatrix(i = ii, j = jj, x = vv, dims = c(n, n), dimnames = list(case_ids, case_ids))
-  master_sim_mat <- pmax(master_sim_mat, Matrix::t(master_sim_mat))
+  # pmax() on two Matrix S4 objects is not a sparse-aware Ops method, so it
+  # silently densifies both operands (n=30485 -> ~7.4GB per dense copy,
+  # multiple transient copies -> OOM with no R traceback). The loop above
+  # only ever populates the upper triangle (j > i), so there is no overlap
+  # between master_sim_mat and its transpose here -- plain sparse addition
+  # gives the identical result while staying sparse throughout.
+  master_sim_mat <- master_sim_mat + Matrix::t(master_sim_mat)
   Matrix::diag(master_sim_mat) <- 1
 
   # ----------------------------
@@ -638,6 +644,29 @@ def lab_csv_path(lab):
     """Absolute path of the cached layout CSV for a lab (e.g. allLabs.csv)."""
     return os.path.join(CACHE_DIR, f"{lab}.csv")
 
+
+def selected_case_is_placed(lab, selected_case_id):
+    """Whether a selected case can be shown on the phenotype map.
+
+    Returns True if the case is in <lab>.csv with finite coordinates, False if
+    it was dropped from the layout (no usable phenotype HPO terms), or None if
+    the question doesn't apply (nothing selected, or no layout file yet).
+    """
+    selected_case_id = _normalize_case_id(selected_case_id)
+    if not selected_case_id:
+        return None
+    lab_file = lab_csv_path(lab)
+    if not os.path.isfile(lab_file):
+        return None
+    df = _load_cached_lab_data(lab_file, os.stat(lab_file).st_mtime_ns)
+    match = df[df['case_ID_paper'].map(_normalize_case_id) == selected_case_id]
+    if match.empty:
+        return False
+    return bool(
+        np.isfinite(match['dim1'].to_numpy()).any()
+        and np.isfinite(match['dim2'].to_numpy()).any()
+    )
+
 def _normalize_case_id(value):
     if value is None or pd.isna(value):
         return None
@@ -729,6 +758,11 @@ def _build_umap_figure(non_hpo_data, hpo_data, hide_other_unspecified=True):
         subset = non_hpo_data[non_hpo_data['disease_category'] == category].copy()
         if subset.empty:
             continue
+
+        finite = np.isfinite(subset['dim1'].to_numpy()) & np.isfinite(subset['dim2'].to_numpy())
+        if not finite.any():
+            continue
+        subset = subset.loc[finite]
 
         finite = np.isfinite(subset['dim1'].to_numpy()) & np.isfinite(subset['dim2'].to_numpy())
         if not finite.any():

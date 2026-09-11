@@ -13,7 +13,12 @@ from rest_framework.views import APIView
 from django.db.models.fields.json import JSONField
 from django.conf import settings
 from django.contrib import messages
-from plot_visualisation.figure1_part2 import generate_umap, lab_csv_path, CACHE_DIR
+from plot_visualisation.figure1_part2 import (
+    generate_umap,
+    lab_csv_path,
+    selected_case_is_placed,
+    CACHE_DIR,
+)
 
 # or for a class-based DRF view
 from rest_framework.authentication import SessionAuthentication
@@ -400,24 +405,43 @@ def plot_umap(request):
             # the test server -- it must never run inside this request/worker.
             # Hand it off to a detached process instead and tell the caller
             # to retry once it's done.
+            # Do NOT start a recompute here. This endpoint only ever sees the
+            # cases in the current request; when it's called from the Cases-view
+            # UMAP button the payload is a single lab's cases, not the whole DB
+            # -- building the "allLabs" layout from that produced a truncated
+            # allLabs.csv on production. Only /api/plot/umap/recompute/ (which
+            # the HGQN backend's recalUmap calls with every case) may kick off
+            # the rebuild. Here we just report that the layout isn't ready.
             needs_redo = redo == 'redo' or not os.path.isfile(lab_csv_path(lab))
             if needs_redo:
-                if not isinstance(cases_payload, list) or not cases_payload:
-                    return JsonResponse(
-                        {
-                            'error': "UMAP data for this lab hasn't been generated yet, "
-                                     "and 'cases' was not provided to start building it."
-                        },
-                        status=409,
-                    )
-                status = start_umap_recompute(lab, cases_payload)
+                # 202 (not an error status) so the HGQN /umap proxy relays the
+                # body through instead of turning it into a BackendError.
                 return JsonResponse(
                     {
-                        'status': 'computing',
-                        'detail': status,
-                        'message': 'UMAP data is being generated in the background; retry shortly.',
+                        'status': 'not_ready',
+                        'message': 'Das UMAP-Layout wurde noch nicht erstellt. '
+                                   'Es wird durch die vollständige Neuberechnung '
+                                   '(HGQN /api/labs/recalUmap) generiert, die beim '
+                                   'Start und monatlich läuft und mehrere Stunden dauert.',
                     },
                     status=202,
+                )
+
+            # If a specific case was selected but it was dropped from
+            # the layout (no usable phenotype HPO terms), tell the client so it
+            # can show a message instead of a map with no highlight.
+            if selected_case_is_placed(lab, selected_case_id) is False:
+                return JsonResponse(
+                    {
+                        'status': 'case_not_in_layout',
+                        'case_id': selected_case_id,
+                        'message': (
+                            f"Für Fall {selected_case_id} sind keine phänotypischen "
+                            "(HPO-)Daten hinterlegt, daher kann er nicht auf der "
+                            "Phänotyp-Karte angezeigt werden."
+                        ),
+                    },
+                    status=200,
                 )
 
             all_cases = pd.DataFrame(cases_payload) if isinstance(cases_payload, list) else pd.DataFrame()
@@ -487,6 +511,19 @@ def plot_umap_recompute(request):
     cases = data.get('cases')
     if not isinstance(cases, list) or not cases:
         return JsonResponse({'error': "Field 'cases' is required"}, status=400)
+
+    # Guard against clobbering the full layout with a partial payload. A real
+    # "allLabs" recompute carries the whole database (thousands of cases); a few
+    # hundred means something upstream sent one lab's cases by mistake.
+    if lab == "allLabs" and len(cases) < 1000:
+        return JsonResponse(
+            {
+                'error': f"Refusing 'allLabs' recompute with only {len(cases)} cases "
+                         "-- the full-database payload is expected to be in the thousands. "
+                         "This request looks like a single lab's cases.",
+            },
+            status=409,
+        )
 
     status = start_umap_recompute(lab, cases)
     return JsonResponse({"status": "started", "detail": status, "lab": lab}, status=202)
