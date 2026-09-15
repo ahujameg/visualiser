@@ -436,9 +436,11 @@ def plot_umap(request):
                         'status': 'case_not_in_layout',
                         'case_id': selected_case_id,
                         'message': (
-                            f"Für Fall {selected_case_id} sind keine phänotypischen "
-                            "(HPO-)Daten hinterlegt, daher kann er nicht auf der "
-                            "Phänotyp-Karte angezeigt werden."
+                            f"Für Fall {selected_case_id} liegt kein für die "
+                            "Phänotyp-Karte verwertbarer HPO-Begriff vor (z. B. nur "
+                            "nicht-phänotypische Angaben wie Vererbungsmodus oder "
+                            "Anamnese), daher kann er nicht auf der Phänotyp-Karte "
+                            "angezeigt werden."
                         ),
                     },
                     status=200,
@@ -513,17 +515,28 @@ def plot_umap_recompute(request):
         return JsonResponse({'error': "Field 'cases' is required"}, status=400)
 
     # Guard against clobbering the full layout with a partial payload. A real
-    # "allLabs" recompute carries the whole database (thousands of cases); a few
-    # hundred means something upstream sent one lab's cases by mistake.
-    if lab == "allLabs" and len(cases) < 1000:
-        return JsonResponse(
-            {
-                'error': f"Refusing 'allLabs' recompute with only {len(cases)} cases "
-                         "-- the full-database payload is expected to be in the thousands. "
-                         "This request looks like a single lab's cases.",
-            },
-            status=409,
-        )
+    # "allLabs" recompute carries the whole database; a single lab's cases sent
+    # by mistake would be a fraction of that. Compare against the row count of
+    # the *current* allLabs.csv rather than a fixed floor -- a hardcoded number
+    # like 1000 would permanently refuse the very first recompute on any
+    # deployment whose whole database is smaller than that (e.g. a fresh HGQN
+    # install). With no existing allLabs.csv yet, there's nothing to compare
+    # against, so the first run for a lab is always allowed through.
+    if lab == "allLabs":
+        existing_path = lab_csv_path(lab)
+        if os.path.isfile(existing_path):
+            with open(existing_path) as fh:
+                baseline_count = sum(1 for _ in fh) - 1  # minus header row
+            if baseline_count > 0 and len(cases) < baseline_count * 0.5:
+                return JsonResponse(
+                    {
+                        'error': f"Refusing 'allLabs' recompute with {len(cases)} cases -- "
+                                 f"fewer than half of the {baseline_count} cases in the current "
+                                 "allLabs.csv. This request looks like a single lab's cases sent "
+                                 "by mistake rather than the full database.",
+                    },
+                    status=409,
+                )
 
     status = start_umap_recompute(lab, cases)
     return JsonResponse({"status": "started", "detail": status, "lab": lab}, status=202)

@@ -45,7 +45,20 @@ prepare_data <- function(TNAMSE_data, gene_to_pheno_path, hpo_obo, lab, redo, ca
 
   hpo<-get_ontology(hpo_obo)
   blacklist_hpos = c("HP:0000006", "HP:0000007", "HP:0001417", "HP:0001419", "HP:0001423", "HP:0001428", "HP:0001450", "HP:0040284", "HP:0040283")
-  only_phenotypes_hpo = get_descendants(hpo, "HP:0000118", exclude_roots = FALSE)
+  # HP:0000118 (Phenotypic abnormality) covers the patient's own phenotype.
+  # HP:0032443 (Past medical history) is included too: real, non-blacklisted
+  # HPO terms like HP:0032317 "Family history of cancer" live there instead,
+  # and a case annotated with only such a term was being silently dropped
+  # from the UMAP layout entirely (case 315467, 2026-09). Other top-level
+  # HPO branches (Mode of inheritance, Frequency, Clinical modifier, Blood
+  # group, Biospecimen phenotypic feature) are deliberately NOT added here --
+  # they're modifiers/metadata rather than phenotype descriptors, which is
+  # exactly why several of their individual terms are already blacklisted
+  # above; including the whole branches would undo that.
+  phenotype_hpo_roots = c("HP:0000118", "HP:0032443")
+  only_phenotypes_hpo = unique(unlist(lapply(
+    phenotype_hpo_roots, function(root) get_descendants(hpo, root, exclude_roots = FALSE)
+  )))
   hpos_to_keep =only_phenotypes_hpo[!only_phenotypes_hpo %in% blacklist_hpos]
 
 
@@ -723,8 +736,10 @@ COLOR_MAP = {
 def _apply_umap_layout(fig):
     fig.update_layout(
         legend=dict(
-            x=0.75,
-            y=0.05,
+            x=1,
+            y=0,
+            xanchor='right',
+            yanchor='bottom',
             bgcolor='rgba(255,255,255,0.5)',
             bordercolor='Grey',
             borderwidth=1,
