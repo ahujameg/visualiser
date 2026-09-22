@@ -393,6 +393,19 @@ def plot_umap(request):
             #if validation_errors:
             #    return JsonResponse({'error': 'Validation Error', 'details': validation_errors}, status=400)
   
+            # 'lab' and 'redo' are required. Validate explicitly instead of a
+            # bare dataInput['lab'] -- callers upstream (HGQN's /api/labs/umap
+            # proxy) can, under a data bug, forward a body missing these (seen
+            # in production as an unhandled KeyError -> 500 for a lab whose
+            # case sequencingLab reference didn't resolve). Fail with a clear
+            # 400 instead.
+            missing = [k for k in ('lab', 'redo') if dataInput.get(k) is None]
+            if missing:
+                return JsonResponse(
+                    {'error': f"Missing required field(s): {', '.join(missing)}"},
+                    status=400,
+                )
+
             lab = dataInput['lab']
             redo = dataInput['redo']
             selected_case_id = normalize_case_id(dataInput.get('selected'))
@@ -514,30 +527,18 @@ def plot_umap_recompute(request):
     if not isinstance(cases, list) or not cases:
         return JsonResponse({'error': "Field 'cases' is required"}, status=400)
 
-    # Guard against clobbering the full layout with a partial payload. A real
-    # "allLabs" recompute carries the whole database; a single lab's cases sent
-    # by mistake would be a fraction of that. Compare against the row count of
-    # the *current* allLabs.csv rather than a fixed floor -- a hardcoded number
-    # like 1000 would permanently refuse the very first recompute on any
-    # deployment whose whole database is smaller than that (e.g. a fresh HGQN
-    # install). With no existing allLabs.csv yet, there's nothing to compare
-    # against, so the first run for a lab is always allowed through.
-    if lab == "allLabs":
-        existing_path = lab_csv_path(lab)
-        if os.path.isfile(existing_path):
-            with open(existing_path) as fh:
-                baseline_count = sum(1 for _ in fh) - 1  # minus header row
-            if baseline_count > 0 and len(cases) < baseline_count * 0.5:
-                return JsonResponse(
-                    {
-                        'error': f"Refusing 'allLabs' recompute with {len(cases)} cases -- "
-                                 f"fewer than half of the {baseline_count} cases in the current "
-                                 "allLabs.csv. This request looks like a single lab's cases sent "
-                                 "by mistake rather than the full database.",
-                    },
-                    status=409,
-                )
-
+    # No size guard here on purpose. This used to refuse a small "allLabs"
+    # payload as looking like a single lab's cases sent by mistake -- but that
+    # mistake could only ever happen via plot_umap's old needs_redo path, which
+    # no longer triggers a recompute at all (see plot_umap above). The only
+    # caller left is HGQN's recalUmap, which always re-queries the *entire*
+    # GRID_cases collection fresh right before calling here, so there's no
+    # remaining path that sends a partial "allLabs" payload. A size guard only
+    # has false positives left to catch: a stale/mismatched cached allLabs.csv
+    # (e.g. copied from another environment), a pruned database, or simply a
+    # deployment whose real case count dropped -- it refused a legitimate local
+    # dev recompute this way on 2026-09-15 (dev DB smaller than a stale
+    # leftover allLabs.csv from a much bigger environment).
     status = start_umap_recompute(lab, cases)
     return JsonResponse({"status": "started", "detail": status, "lab": lab}, status=202)
 

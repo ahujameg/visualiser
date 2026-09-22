@@ -230,7 +230,7 @@ for (g in dup_groups) {
     neigh_idx[[i]] <- unique(c(neigh_idx[[i]], others))
   }
 }
-  if (FALSE) {
+  if (TRUE) {
   # ----------------------------
 # D2) Augment candidates: all cases sharing at least one HPO term
 #      (fixes "identical single-term cases far apart")
@@ -240,7 +240,7 @@ for (g in dup_groups) {
 term2cases <- new.env(parent = emptyenv())
 
 for (i in seq_len(n)) {
-  ts <- anc_sets[[i]]
+  ts <- term_sets[[i]]
   ts <- ts[!is.na(ts)]
   if (length(ts) == 0) next
   for (t in unique(ts)) {
@@ -254,10 +254,10 @@ for (i in seq_len(n)) {
 }
 
 # Add shared-term neighbors to each neigh list (cap to avoid explosion)
-# precompute term frequency over expanded ancestors
+# precompute term frequency
 term_freq <- new.env(parent=emptyenv())
 for (i in seq_len(n)) {
-  ts <- anc_sets[[i]]
+  ts <- term_sets[[i]]
   for (t in ts) {
     key <- as.character(t)
     term_freq[[key]] <- (if (exists(key, term_freq, inherits=FALSE)) term_freq[[key]] else 0L) + 1L
@@ -271,11 +271,15 @@ cap_for_term <- function(t) {
 }
 
 for (i in seq_len(n)) {
-  ts <- anc_sets[[i]]
+  ts <- term_sets[[i]]
   ts <- ts[!is.na(ts)]
   if (length(ts) == 0) next
 
   cand <- integer(0)
+  set.seed(i)  # single per-case seed (matches sampling below) -- reseeding
+               # per term would need a per-(i,t) integer, and i alone already
+               # overflows R's 32-bit set.seed() at production scale (n~30k)
+               # once multiplied by a term-derived offset
 
 for (t in unique(ts)) {
   key <- as.character(t)
@@ -286,8 +290,13 @@ for (t in unique(ts)) {
   tmp <- tmp[tmp != i]
   tmp <- unique(tmp)
 
-  cap <- cap_for_term(key)          # ✅ call per term
-  if (length(tmp) > cap) tmp <- tmp[seq_len(cap)]  # ✅ cap per term
+  cap <- cap_for_term(key)          # call per term
+  if (length(tmp) > cap) {
+    tmp <- sample(tmp, cap)          # random subset, not a fixed prefix -- a
+                                      # positional truncation here would just
+                                      # reintroduce the same fracturing this
+                                      # block exists to fix
+  }
 
   cand <- c(cand, tmp)
 }
