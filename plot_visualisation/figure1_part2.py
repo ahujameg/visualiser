@@ -17,6 +17,7 @@ from plotly.subplots import make_subplots
 import json
 import os
 import numpy as np
+from datetime import datetime
 from functools import lru_cache
 
 
@@ -322,12 +323,9 @@ rm(term2cases); gc()
   # ----------------------------
   information_content <- descendants_IC(hpo)
 
-  ii <- integer(0)
-  jj <- integer(0)
-  vv <- numeric(0)
-
-  # helper: Resnik avg similarity between two term sets (returns scalar)
-    # helper: Resnik avg similarity between two term sets (returns scalar), with caching by phenotype signature
+  # helper: Resnik avg similarity between two term sets (returns scalar), with
+  # caching by phenotype signature. Only used for the few connectivity bridges
+  # below and as a fallback; the main loop uses the batched resnik_row().
   resnik_cache <- new.env(parent = emptyenv(), hash = TRUE)
 
   resnik_avg_pair <- function(ts1, ts2, s1 = NULL, s2 = NULL) {
@@ -360,32 +358,66 @@ rm(term2cases); gc()
     val
   }
 
+  # Same cleaning resnik_avg_pair() applies per call, done once up front.
+  # Disease rows from gene_to_pheno repeat a term once per associated gene,
+  # and "average" would weight those duplicates differently.
+  term_sets_u <- lapply(term_sets, function(ts) unique(ts[!is.na(ts)]))
+
+  # Resnik similarity of case i against all of its candidates js in ONE
+  # get_sim_grid() call. Gives exactly the values resnik_avg_pair() gives per
+  # pair (max |diff| = 0 on 6000 real pairs) but ~30x faster: the per-call R
+  # overhead is paid once per case instead of once per pair. Candidates that
+  # share a phenotype signature are computed once. NA where either set is empty.
+  resnik_row <- function(i, js) {
+    if (length(term_sets_u[[i]]) == 0) return(rep(NA_real_, length(js)))
+    reps <- js[lengths(term_sets_u[js]) > 0]
+    reps <- reps[!duplicated(sig[reps])]
+    if (length(reps) == 0) return(rep(NA_real_, length(js)))
+    vals <- tryCatch(
+      as.numeric(get_sim_grid(
+        ontology = hpo,
+        information_content = information_content,
+        term_sets = list(term_sets_u[[i]]),
+        term_sets2 = term_sets_u[reps],
+        term_sim_method = "resnik",
+        combine = "average"
+      )[1, ]),
+      error = function(e) vapply(reps, function(j)
+        resnik_avg_pair(term_sets[[i]], term_sets[[j]], sig[i], sig[j]), numeric(1))
+    )
+    vals[match(sig[js], sig[reps])]
+  }
+
+  # Per-case results, concatenated once after the loop. Growing ii/jj/vv with
+  # c() for every pair copied the whole vectors each time (quadratic in the
+  # number of pairs), and the allocation churn kept triggering full garbage
+  # collections over the ever-growing resnik_cache. Together with the per-pair
+  # get_sim_grid() calls, that made the 2026-10-01 production run (up to 600
+  # candidates per case since the D2 augmentation was re-enabled) still be at
+  # row 21900/31053 after 8.5 days.
+  ii_list <- vector("list", n)
+  jj_list <- vector("list", n)
+  vv_list <- vector("list", n)
+
   cat("Sparse Resnik: start at", format(Sys.time()), "\n"); flush.console()
 
   for (i in seq_len(n)) {
     js <- neigh_idx[[i]]
-    
-    
     if (length(js) == 0) next
-    tsi <- term_sets[[i]]
-    added_any <- FALSE
-    for (j in js) {
-      if (j <= i) next  # upper triangle only (symmetry)
-      sim <- resnik_avg_pair(tsi, term_sets[[j]], sig[i], sig[j])
-      if (!is.na(sim) && is.finite(sim)) {
-        added_any <- TRUE
-        ii <- c(ii, i)
-        jj <- c(jj, j)
-        vv <- c(vv, sim)
-      }
-    }
-    
-    if (!added_any && length(js) > 0) {
+
+    js_up <- js[js > i]  # upper triangle only (symmetry)
+    sims <- if (length(js_up) > 0) resnik_row(i, js_up) else numeric(0)
+    ok <- !is.na(sims) & is.finite(sims)
+
+    if (any(ok)) {
+      ii_list[[i]] <- rep.int(i, sum(ok))
+      jj_list[[i]] <- js_up[ok]
+      vv_list[[i]] <- sims[ok]
+    } else {
       # add a tiny edge to the closest candidate to avoid isolated nodes
-      j0 <- js[1]
-      ii <- c(ii, i)
-      jj <- c(jj, j0)
-      vv <- c(vv, 1e-6)
+      ii_list[[i]] <- i
+      jj_list[[i]] <- js[1]
+      vv_list[[i]] <- 1e-6
     }
     if (i %% 100 == 0) {
       cat("  computed pairs for i =", i, " / ", n, " at ", format(Sys.time()), "\n")
@@ -393,7 +425,12 @@ rm(term2cases); gc()
     }
   }
 
-  cat("Sparse Resnik: done at", format(Sys.time()), "\n"); flush.console()
+  ii <- unlist(ii_list, use.names = FALSE)
+  jj <- unlist(jj_list, use.names = FALSE)
+  vv <- unlist(vv_list, use.names = FALSE)
+  rm(ii_list, jj_list, vv_list); gc()
+
+  cat("Sparse Resnik: done at", format(Sys.time()), " -", length(vv), "pairs\n"); flush.console()
 
   # Build symmetric sparse similarity matrix
   master_sim_mat <- Matrix::sparseMatrix(i = ii, j = jj, x = vv, dims = c(n, n), dimnames = list(case_ids, case_ids))
@@ -520,9 +557,14 @@ dist_mat <- matrix(1,  nrow = n, ncol = umap_k)
 
 cat("nz==0 count:", sum(Matrix::rowSums(D != 0) == 0), "\n"); flush.console()
 .isolated_ids <- character(0)   # diagnostics: cases with no similarity edges
+# Row i of D is read as column i of t(D), straight from the CSC slots:
+# D[i, ] on a dgCMatrix scans the whole matrix every time (~33 min over all
+# rows at n=30k / 13M nonzeros); a column slice is O(degree) and identical.
+Dt <- Matrix::t(D)
 for (i in seq_len(n)) {
-  row_i <- D[i, , drop = FALSE]
-  nz <- which(row_i != 0)
+  k <- seq.int(Dt@p[i] + 1L, length.out = Dt@p[i + 1L] - Dt@p[i])
+  row_vals <- Dt@x[k]
+  nz <- Dt@i[k][row_vals != 0] + 1L
 
   # If no neighbors (should be rare), connect to a dummy neighbor
  if (length(nz) == 0) {
@@ -538,7 +580,7 @@ for (i in seq_len(n)) {
   next
 }
 
-  vals <- as.numeric(row_i[1, nz])  # distances on existing edges
+  vals <- row_vals[row_vals != 0]  # distances on existing edges
   o <- order(vals, nz)                  # smallest distance = closest
 
   take <- min(umap_k, length(nz))
@@ -631,8 +673,19 @@ TNAMSE_and_HPO_flat[] <- lapply(TNAMSE_and_HPO_flat, function(col) {
   }
 })
 
-  # Save the primary data
-  write.csv(TNAMSE_and_HPO_flat, file.path(cache_dir, paste(lab, "csv", sep=".")), row.names = FALSE)
+  # Save the primary data, plus the cases dropped for lack of usable HPO terms
+  # so the UMAP view can tell "no usable HPO term" apart from "case created
+  # after this layout was built" -- both are simply absent from <lab>.csv.
+  # Written to temp files and renamed into place (dropped list first), so a
+  # request never reads a half-written file and a run that dies earlier
+  # leaves the previous pair untouched.
+  out_csv <- file.path(cache_dir, paste(lab, "csv", sep="."))
+  out_dropped <- file.path(cache_dir, paste0(lab, "_dropped.csv"))
+  write.csv(data.frame(case_ID_paper = as.character(.dropped_no_pheno)),
+            paste0(out_dropped, ".tmp"), row.names = FALSE)
+  write.csv(TNAMSE_and_HPO_flat, paste0(out_csv, ".tmp"), row.names = FALSE)
+  file.rename(paste0(out_dropped, ".tmp"), out_dropped)
+  file.rename(paste0(out_csv, ".tmp"), out_csv)
 
   return(as.data.frame(TNAMSE_and_HPO))
 }
@@ -667,27 +720,55 @@ def lab_csv_path(lab):
     return os.path.join(CACHE_DIR, f"{lab}.csv")
 
 
-def selected_case_is_placed(lab, selected_case_id):
-    """Whether a selected case can be shown on the phenotype map.
+def lab_dropped_path(lab):
+    """Cases the last recompute dropped for lack of usable HPO terms."""
+    return os.path.join(CACHE_DIR, f"{lab}_dropped.csv")
 
-    Returns True if the case is in <lab>.csv with finite coordinates, False if
-    it was dropped from the layout (no usable phenotype HPO terms), or None if
-    the question doesn't apply (nothing selected, or no layout file yet).
+
+@lru_cache(maxsize=8)
+def _load_dropped_case_ids(dropped_file, mtime_ns):
+    del mtime_ns  # Only used to invalidate the cache when the file changes.
+    dropped = pd.read_csv(dropped_file, dtype={"case_ID_paper": str})
+    return frozenset(dropped["case_ID_paper"].map(_normalize_case_id).dropna())
+
+
+def selected_case_layout_status(lab, selected_case_id):
+    """Whether, and if not why not, a selected case is on the phenotype map.
+
+    Returns (status, layout_built_at). layout_built_at is the layout CSV's
+    modification time (datetime), i.e. when the last recompute finished.
+    status is None if the question doesn't apply (nothing selected, or no
+    layout file yet), otherwise one of:
+
+    - "placed": in <lab>.csv with finite coordinates
+    - "no_coordinates": in <lab>.csv, but the embedding didn't place it
+    - "no_usable_hpo": the last recompute dropped it (no usable HPO term)
+    - "not_in_layout": not part of the last recompute at all, i.e. created
+      (or given HPO terms) after the layout was built
+    - "unknown": absent, but the layout predates <lab>_dropped.csv, so the
+      previous two can't be told apart
     """
     selected_case_id = _normalize_case_id(selected_case_id)
-    if not selected_case_id:
-        return None
     lab_file = lab_csv_path(lab)
-    if not os.path.isfile(lab_file):
-        return None
-    df = _load_cached_lab_data(lab_file, os.stat(lab_file).st_mtime_ns)
+    if not selected_case_id or not os.path.isfile(lab_file):
+        return None, None
+    lab_stat = os.stat(lab_file)
+    built_at = datetime.fromtimestamp(lab_stat.st_mtime)
+
+    df = _load_cached_lab_data(lab_file, lab_stat.st_mtime_ns)
     match = df[df['case_ID_paper'].map(_normalize_case_id) == selected_case_id]
-    if match.empty:
-        return False
-    return bool(
-        np.isfinite(match['dim1'].to_numpy()).any()
-        and np.isfinite(match['dim2'].to_numpy()).any()
-    )
+    if not match.empty:
+        placed = (
+            np.isfinite(match['dim1'].to_numpy()).any()
+            and np.isfinite(match['dim2'].to_numpy()).any()
+        )
+        return ("placed" if placed else "no_coordinates"), built_at
+
+    dropped_file = lab_dropped_path(lab)
+    if not os.path.isfile(dropped_file):
+        return "unknown", built_at
+    dropped = _load_dropped_case_ids(dropped_file, os.stat(dropped_file).st_mtime_ns)
+    return ("no_usable_hpo" if selected_case_id in dropped else "not_in_layout"), built_at
 
 def _normalize_case_id(value):
     if value is None or pd.isna(value):

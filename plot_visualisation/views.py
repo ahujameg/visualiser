@@ -16,9 +16,10 @@ from django.contrib import messages
 from plot_visualisation.figure1_part2 import (
     generate_umap,
     lab_csv_path,
-    selected_case_is_placed,
+    selected_case_layout_status,
     CACHE_DIR,
 )
+from plot_visualisation.middleware import request_can_view_case_ids
 
 # or for a class-based DRF view
 from rest_framework.authentication import SessionAuthentication
@@ -132,6 +133,47 @@ def normalize_case_id(value):
             return numeric_part
 
     return case_id
+
+
+def case_not_in_layout_message(case_id, status, built_at):
+    """User-facing (German) explanation for a selected case missing from the map.
+
+    status/built_at come from figure1_part2.selected_case_layout_status().
+    case_id=None words it without the ID (viewer may not see it).
+    """
+    subject = f"Fall {case_id}" if case_id else "Dieser Fall"
+    accusative = f"Fall {case_id}" if case_id else "diesen Fall"
+    stand = f"Stand: {built_at:%d.%m.%Y}" if built_at else "Stand unbekannt"
+    next_run = ("Die Karte wird monatlich (jeweils am 1.) neu berechnet; danach "
+                "erscheint der Fall.")
+    if status == "no_usable_hpo":
+        return (
+            f"Für {accusative} lag bei der letzten Berechnung der Phänotyp-Karte "
+            f"({stand}) kein verwertbarer HPO-Begriff vor (z. B. nur "
+            "nicht-phänotypische Angaben wie Vererbungsmodus). Wurden die "
+            "HPO-Begriffe seitdem ergänzt, erscheint der Fall nach der nächsten "
+            "monatlichen Neuberechnung."
+        )
+    if status == "not_in_layout":
+        return (
+            f"{subject} ist in der aktuellen Phänotyp-Karte ({stand}) noch "
+            "nicht enthalten, da er erst nach dieser Berechnung angelegt bzw. "
+            f"mit HPO-Begriffen versehen wurde. {next_run}"
+        )
+    if status == "no_coordinates":
+        return (
+            f"{subject} ist in der Phänotyp-Karte ({stand}) enthalten, "
+            "konnte aber nicht positioniert werden."
+        )
+    # "unknown": layout built before the dropped-case list existed.
+    return (
+        f"{subject} ist in der aktuellen Phänotyp-Karte ({stand}) nicht "
+        "enthalten. Entweder wurde er erst nach dieser Berechnung angelegt bzw. "
+        "geändert, oder er hat keinen für die Karte verwertbaren HPO-Begriff "
+        "(z. B. nur Angaben wie Vererbungsmodus). Im ersten Fall erscheint er "
+        "nach der nächsten monatlichen Neuberechnung."
+    )
+
 
 class CsrfExemptSessionAuth(SessionAuthentication):
     def enforce_csrf(self, request):  # disable check
@@ -440,20 +482,33 @@ def plot_umap(request):
                     status=202,
                 )
 
-            # If a specific case was selected but it was dropped from
-            # the layout (no usable phenotype HPO terms), tell the client so it
-            # can show a message instead of a map with no highlight.
-            if selected_case_is_placed(lab, selected_case_id) is False:
+            # If a specific case was selected but isn't on the map, tell the
+            # client why (dropped for lack of usable HPO terms vs. created after
+            # the layout was built) instead of showing a map with no highlight.
+            layout_status, layout_built_at = selected_case_layout_status(lab, selected_case_id)
+            if layout_status not in (None, "placed"):
+                # selected_case_id is the hidden real ID, also sent for other
+                # labs' cases (shown as "Not available" in the grid), and
+                # UmapPrivacyMiddleware only redacts plot hover text -- so
+                # apply the same same-lab-or-superuser rule here. The plain
+                # Django request, not DRF's, so reading .user can't trigger
+                # DRF's session CSRF check.
+                shown_case_id = (
+                    selected_case_id
+                    if request_can_view_case_ids(getattr(request, '_request', request), dataInput)
+                    else None
+                )
                 return JsonResponse(
                     {
                         'status': 'case_not_in_layout',
-                        'case_id': selected_case_id,
-                        'message': (
-                            f"Für Fall {selected_case_id} liegt kein für die "
-                            "Phänotyp-Karte verwertbarer HPO-Begriff vor (z. B. nur "
-                            "nicht-phänotypische Angaben wie Vererbungsmodus oder "
-                            "Anamnese), daher kann er nicht auf der Phänotyp-Karte "
-                            "angezeigt werden."
+                        'reason': layout_status,
+                        'case_id': shown_case_id,
+                        'layout_built_at': (
+                            layout_built_at.isoformat(timespec='minutes')
+                            if layout_built_at else None
+                        ),
+                        'message': case_not_in_layout_message(
+                            shown_case_id, layout_status, layout_built_at
                         ),
                     },
                     status=200,
